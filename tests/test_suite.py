@@ -33,6 +33,23 @@ def test_run_contract_suite_happy_path() -> None:
             }
         ],
     }
+    changes_payload = {
+        "ok": True,
+        "changes": [
+            {
+                "cursor": "cur-1",
+                "thread": thread_payload,
+            }
+        ],
+        "next_cursor": "cur-2",
+        "has_more": True,
+    }
+    changes_follow_up_payload = {
+        "ok": True,
+        "changes": [],
+        "next_cursor": None,
+        "has_more": False,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
@@ -59,6 +76,11 @@ def test_run_contract_suite_happy_path() -> None:
             body = json.loads(request.content.decode("utf-8"))
             assert body["message"] == "ack from conformance"
             return httpx.Response(200, json={"ok": True, "thread": thread_payload})
+        if request.url.path == "/v1/inbox/changes":
+            assert request.url.params.get("owner_agent") == "agent://conformance/owner"
+            if request.url.params.get("cursor") == "cur-2":
+                return httpx.Response(200, json=changes_follow_up_payload)
+            return httpx.Response(200, json=changes_payload)
         return httpx.Response(404, json={"error": "not_found"})
 
     results = run_contract_suite(
@@ -66,7 +88,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 5
+    assert len(results) == 6
     assert all(r.passed for r in results)
 
 
@@ -83,9 +105,10 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 5
+    assert len(results) == 6
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
     assert not results[3].passed
     assert not results[4].passed
+    assert not results[5].passed

@@ -34,6 +34,7 @@ def run_contract_suite(
             _check_intent_create_idempotency_contract(client),
             _check_inbox_list_contract(client),
             _check_inbox_reply_contract(client),
+            _check_inbox_changes_pagination_contract(client),
         ]
     finally:
         client.close()
@@ -145,6 +146,47 @@ def _check_inbox_reply_contract(client: httpx.Client) -> ContractResult:
     return ContractResult("inbox_reply", True, "ok")
 
 
+def _check_inbox_changes_pagination_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    response = client.get("/v1/inbox/changes", params={"owner_agent": owner_agent})
+    if response.status_code != 200:
+        return ContractResult("inbox_changes_pagination", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("inbox_changes_pagination", False, "missing or invalid field: ok")
+
+    changes = data.get("changes")
+    has_more = data.get("has_more")
+    next_cursor = data.get("next_cursor")
+
+    if not isinstance(changes, list):
+        return ContractResult("inbox_changes_pagination", False, "missing or invalid field: changes")
+    if not isinstance(has_more, bool):
+        return ContractResult("inbox_changes_pagination", False, "missing or invalid field: has_more")
+    if next_cursor is not None and not isinstance(next_cursor, str):
+        return ContractResult("inbox_changes_pagination", False, "invalid field: next_cursor")
+
+    if changes and not _is_inbox_change_shape(changes[0]):
+        return ContractResult("inbox_changes_pagination", False, "invalid inbox change shape")
+
+    if has_more:
+        if not isinstance(next_cursor, str) or len(next_cursor) < 3:
+            return ContractResult("inbox_changes_pagination", False, "has_more=true requires next_cursor")
+        follow_up = client.get(
+            "/v1/inbox/changes",
+            params={"owner_agent": owner_agent, "cursor": next_cursor},
+        )
+        if follow_up.status_code != 200:
+            return ContractResult(
+                "inbox_changes_pagination",
+                False,
+                f"follow-up status={follow_up.status_code}",
+            )
+
+    return ContractResult("inbox_changes_pagination", True, "ok")
+
+
 def _build_intent_create_payload(*, correlation_id: str) -> dict[str, object]:
     return {
         "intent_type": "notify.message.v1",
@@ -153,6 +195,14 @@ def _build_intent_create_payload(*, correlation_id: str) -> dict[str, object]:
         "to_agent": "agent://conformance/receiver",
         "payload": {"text": "hello from conformance"},
     }
+
+
+def _is_inbox_change_shape(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    cursor = value.get("cursor")
+    thread = value.get("thread")
+    return isinstance(cursor, str) and len(cursor) >= 3 and _is_thread_shape(thread)
 
 
 def _is_thread_shape(value: object) -> bool:
