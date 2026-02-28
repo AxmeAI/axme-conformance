@@ -36,6 +36,8 @@ def run_contract_suite(
             _check_inbox_list_contract(client),
             _check_inbox_reply_contract(client),
             _check_inbox_changes_pagination_contract(client),
+            _check_approvals_decision_contract(client),
+            _check_capabilities_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
         ]
@@ -199,6 +201,58 @@ def _check_inbox_changes_pagination_contract(client: httpx.Client) -> ContractRe
             )
 
     return ContractResult("inbox_changes_pagination", True, "ok")
+
+
+def _check_approvals_decision_contract(client: httpx.Client) -> ContractResult:
+    approval_id = str(uuid4())
+    response = client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"decision": "approve", "comment": "approved by conformance"},
+    )
+    if response.status_code != 200:
+        return ContractResult("approvals_decision", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("approvals_decision", False, "missing or invalid field: ok")
+
+    approval = data.get("approval")
+    if not isinstance(approval, dict):
+        return ContractResult("approvals_decision", False, "missing or invalid field: approval")
+    if not _is_uuid(approval.get("approval_id")):
+        return ContractResult("approvals_decision", False, "approval_id is not UUID")
+    if approval.get("decision") not in {"approve", "reject"}:
+        return ContractResult("approvals_decision", False, "invalid field: decision")
+    if not isinstance(approval.get("decided_at"), str):
+        return ContractResult("approvals_decision", False, "missing or invalid field: decided_at")
+    comment = approval.get("comment")
+    if comment is not None and not isinstance(comment, str):
+        return ContractResult("approvals_decision", False, "invalid field: comment")
+
+    return ContractResult("approvals_decision", True, "ok")
+
+
+def _check_capabilities_contract(client: httpx.Client) -> ContractResult:
+    response = client.get("/v1/capabilities")
+    if response.status_code != 200:
+        return ContractResult("capabilities_get", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("capabilities_get", False, "missing or invalid field: ok")
+
+    capabilities = data.get("capabilities")
+    supported_intent_types = data.get("supported_intent_types")
+    if not isinstance(capabilities, list) or len(capabilities) < 1:
+        return ContractResult("capabilities_get", False, "missing or invalid field: capabilities")
+    if not all(isinstance(item, str) and len(item) >= 3 for item in capabilities):
+        return ContractResult("capabilities_get", False, "invalid field: capabilities items")
+    if not isinstance(supported_intent_types, list) or len(supported_intent_types) < 1:
+        return ContractResult("capabilities_get", False, "missing or invalid field: supported_intent_types")
+    if not all(isinstance(item, str) and item.startswith("intent.") and item.endswith(".v1") for item in supported_intent_types):
+        return ContractResult("capabilities_get", False, "invalid field: supported_intent_types items")
+
+    return ContractResult("capabilities_get", True, "ok")
 
 
 def _check_webhooks_subscriptions_contract(client: httpx.Client) -> ContractResult:
