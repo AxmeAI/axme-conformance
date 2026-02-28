@@ -10,6 +10,8 @@ from conformance import run_contract_suite
 
 def test_run_contract_suite_happy_path() -> None:
     idempotency_cache: dict[str, tuple[str, str]] = {}
+    invites: dict[str, dict[str, object]] = {}
+    invite_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
     intent_id = "22222222-2222-4222-8222-222222222222"
     event_id = "33333333-3333-4333-8333-333333333333"
@@ -105,6 +107,7 @@ def test_run_contract_suite_happy_path() -> None:
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal invite_counter
         if request.url.path == "/health":
             trace_id = request.headers.get("x-trace-id")
             if trace_id is not None:
@@ -144,6 +147,89 @@ def test_run_contract_suite_happy_path() -> None:
             return httpx.Response(200, json=approval_response)
         if request.url.path == "/v1/capabilities":
             return httpx.Response(200, json=capabilities_response)
+        if request.url.path == "/v1/invites/create" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["owner_agent"] == "agent://conformance/owner"
+            invite_counter += 1
+            token = f"invite-token-{invite_counter:04d}"
+            invite_state = {
+                "token": token,
+                "owner_agent": "agent://conformance/owner",
+                "recipient_hint": body.get("recipient_hint"),
+                "status": "pending",
+                "created_at": "2026-02-28T00:00:00Z",
+                "expires_at": "2026-03-01T00:00:00Z",
+                "accepted_at": None,
+                "accepted_owner_agent": None,
+                "nick": None,
+                "public_address": None,
+            }
+            invites[token] = invite_state
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "token": token,
+                    "invite_url": f"https://invite.example/{token}",
+                    "owner_agent": invite_state["owner_agent"],
+                    "recipient_hint": invite_state["recipient_hint"],
+                    "status": invite_state["status"],
+                    "created_at": invite_state["created_at"],
+                    "expires_at": invite_state["expires_at"],
+                },
+            )
+        if request.url.path.startswith("/v1/invites/") and request.method == "GET":
+            token = request.url.path.split("/")[-1]
+            if token not in invites:
+                return httpx.Response(404, json={"error": "not_found"})
+            invite_state = invites[token]
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "token": token,
+                    "owner_agent": invite_state["owner_agent"],
+                    "recipient_hint": invite_state["recipient_hint"],
+                    "status": invite_state["status"],
+                    "created_at": invite_state["created_at"],
+                    "expires_at": invite_state["expires_at"],
+                    "accepted_at": invite_state["accepted_at"],
+                    "accepted_owner_agent": invite_state["accepted_owner_agent"],
+                    "nick": invite_state["nick"],
+                    "public_address": invite_state["public_address"],
+                },
+            )
+        if request.url.path.startswith("/v1/invites/") and request.url.path.endswith("/accept") and request.method == "POST":
+            token = request.url.path.split("/")[-2]
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["nick"] == "@Invite.Conformance.User"
+            if token not in invites:
+                return httpx.Response(404, json={"error": "not_found"})
+            invites[token].update(
+                {
+                    "status": "accepted",
+                    "accepted_at": "2026-02-28T00:00:10Z",
+                    "accepted_owner_agent": "agent://conformance/accepted",
+                    "nick": "@Invite.Conformance.User",
+                    "public_address": "invite.conformance.user@ax",
+                }
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "token": token,
+                    "status": "accepted",
+                    "invite_owner_agent": "agent://conformance/owner",
+                    "user_id": "66666666-6666-4666-8666-666666666666",
+                    "owner_agent": "agent://conformance/accepted",
+                    "nick": "@Invite.Conformance.User",
+                    "public_address": "invite.conformance.user@ax",
+                    "display_name": body.get("display_name"),
+                    "accepted_at": "2026-02-28T00:00:10Z",
+                    "registry_bind_status": "propagated",
+                },
+            )
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "POST":
             return httpx.Response(200, json={"ok": True, "subscription": webhook_subscription})
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "GET":
@@ -168,7 +254,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 11
+    assert len(results) == 14
     assert all(r.passed for r in results)
 
 
@@ -185,7 +271,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 11
+    assert len(results) == 14
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -197,3 +283,6 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[8].passed
     assert not results[9].passed
     assert not results[10].passed
+    assert not results[11].passed
+    assert not results[12].passed
+    assert not results[13].passed

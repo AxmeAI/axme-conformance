@@ -38,6 +38,9 @@ def run_contract_suite(
             _check_inbox_changes_pagination_contract(client),
             _check_approvals_decision_contract(client),
             _check_capabilities_contract(client),
+            _check_invites_create_contract(client),
+            _check_invites_get_contract(client),
+            _check_invites_accept_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
         ]
@@ -253,6 +256,104 @@ def _check_capabilities_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("capabilities_get", False, "invalid field: supported_intent_types items")
 
     return ContractResult("capabilities_get", True, "ok")
+
+
+def _check_invites_create_contract(client: httpx.Client) -> ContractResult:
+    response = client.post(
+        "/v1/invites/create",
+        json={
+            "owner_agent": "agent://conformance/owner",
+            "recipient_hint": "Conformance receiver",
+            "ttl_seconds": 3600,
+        },
+    )
+    if response.status_code != 200:
+        return ContractResult("invites_create", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("invites_create", False, "missing or invalid field: ok")
+    token = data.get("token")
+    invite_url = data.get("invite_url")
+    if not isinstance(token, str) or len(token) < 12:
+        return ContractResult("invites_create", False, "missing or invalid field: token")
+    if not isinstance(invite_url, str) or not invite_url.startswith("http"):
+        return ContractResult("invites_create", False, "missing or invalid field: invite_url")
+    if data.get("status") not in {"pending", "accepted", "expired"}:
+        return ContractResult("invites_create", False, "invalid field: status")
+
+    return ContractResult("invites_create", True, "ok")
+
+
+def _check_invites_get_contract(client: httpx.Client) -> ContractResult:
+    create_response = client.post(
+        "/v1/invites/create",
+        json={
+            "owner_agent": "agent://conformance/owner",
+            "recipient_hint": "Conformance receiver",
+            "ttl_seconds": 3600,
+        },
+    )
+    if create_response.status_code != 200:
+        return ContractResult("invites_get", False, f"create status={create_response.status_code}")
+    token = create_response.json().get("token")
+    if not isinstance(token, str) or len(token) < 12:
+        return ContractResult("invites_get", False, "invalid token from create invite response")
+
+    response = client.get(f"/v1/invites/{token}")
+    if response.status_code != 200:
+        return ContractResult("invites_get", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("invites_get", False, "missing or invalid field: ok")
+    if data.get("token") != token:
+        return ContractResult("invites_get", False, "token mismatch")
+    if not isinstance(data.get("owner_agent"), str):
+        return ContractResult("invites_get", False, "missing or invalid field: owner_agent")
+    if data.get("status") not in {"pending", "accepted", "expired"}:
+        return ContractResult("invites_get", False, "invalid field: status")
+
+    return ContractResult("invites_get", True, "ok")
+
+
+def _check_invites_accept_contract(client: httpx.Client) -> ContractResult:
+    create_response = client.post(
+        "/v1/invites/create",
+        json={
+            "owner_agent": "agent://conformance/owner",
+            "recipient_hint": "Conformance receiver",
+            "ttl_seconds": 3600,
+        },
+    )
+    if create_response.status_code != 200:
+        return ContractResult("invites_accept", False, f"create status={create_response.status_code}")
+    token = create_response.json().get("token")
+    if not isinstance(token, str) or len(token) < 12:
+        return ContractResult("invites_accept", False, "invalid token from create invite response")
+
+    response = client.post(
+        f"/v1/invites/{token}/accept",
+        json={"nick": "@Invite.Conformance.User", "display_name": "Conformance User"},
+    )
+    if response.status_code != 200:
+        return ContractResult("invites_accept", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("invites_accept", False, "missing or invalid field: ok")
+    if data.get("token") != token:
+        return ContractResult("invites_accept", False, "token mismatch")
+    if data.get("status") != "accepted":
+        return ContractResult("invites_accept", False, "missing or invalid field: status")
+    if not _is_uuid(data.get("user_id")):
+        return ContractResult("invites_accept", False, "missing or invalid field: user_id")
+    if not isinstance(data.get("owner_agent"), str):
+        return ContractResult("invites_accept", False, "missing or invalid field: owner_agent")
+    if not isinstance(data.get("public_address"), str):
+        return ContractResult("invites_accept", False, "missing or invalid field: public_address")
+    if data.get("registry_bind_status") not in {"propagated", "failed", "disabled", "skipped_no_hint"}:
+        return ContractResult("invites_accept", False, "invalid field: registry_bind_status")
+
+    return ContractResult("invites_accept", True, "ok")
 
 
 def _check_webhooks_subscriptions_contract(client: httpx.Client) -> ContractResult:
