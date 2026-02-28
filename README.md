@@ -6,10 +6,11 @@ Conformance suite for API and SDK compatibility checks.
 
 Initial harness skeleton in progress.
 
-## Scope (Wave 1)
+## Scope (Track C baseline)
 
 - Health contract
 - Intent create contract
+- Intent create idempotency/correlation contract
 - Baseline suite execution and result model
 
 ## Development
