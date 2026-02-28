@@ -30,6 +30,7 @@ def run_contract_suite(
     try:
         return [
             _check_health_contract(client),
+            _check_trace_header_contract(client),
             _check_intent_create_contract(client),
             _check_intent_create_idempotency_contract(client),
             _check_inbox_list_contract(client),
@@ -50,6 +51,17 @@ def _check_health_contract(client: httpx.Client) -> ContractResult:
     if "ok" not in data:
         return ContractResult("health", False, "missing field: ok")
     return ContractResult("health", True, "ok")
+
+
+def _check_trace_header_contract(client: httpx.Client) -> ContractResult:
+    trace_id = str(uuid4())
+    response = client.get("/health", headers={"X-Trace-Id": trace_id})
+    if response.status_code != 200:
+        return ContractResult("trace_header", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("trace_header", False, "missing or invalid field: ok")
+    return ContractResult("trace_header", True, "ok")
 
 
 def _check_intent_create_contract(client: httpx.Client) -> ContractResult:
