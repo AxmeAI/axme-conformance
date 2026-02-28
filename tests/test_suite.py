@@ -91,6 +91,9 @@ def test_run_contract_suite_happy_path() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
+            trace_id = request.headers.get("x-trace-id")
+            if trace_id is not None:
+                assert isinstance(trace_id, str) and len(trace_id) > 0
             return httpx.Response(200, json={"ok": True})
         if request.url.path == "/v1/intents":
             body = json.loads(request.content.decode("utf-8"))
@@ -143,7 +146,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 8
+    assert len(results) == 9
     assert all(r.passed for r in results)
 
 
@@ -160,7 +163,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 8
+    assert len(results) == 9
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -169,3 +172,4 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[5].passed
     assert not results[6].passed
     assert not results[7].passed
+    assert not results[8].passed
