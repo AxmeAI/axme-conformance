@@ -13,6 +13,7 @@ Initial harness skeleton in progress.
 - Intent create idempotency/correlation contract
 - Inbox list contract
 - Inbox reply contract
+- Inbox changes pagination contract
 - Baseline suite execution and result model
 
 ## Development
