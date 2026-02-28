@@ -14,6 +14,8 @@ Initial harness skeleton in progress.
 - Inbox list contract
 - Inbox reply contract
 - Inbox changes pagination contract
+- Webhooks subscriptions contract
+- Webhooks events/replay contract
 - Baseline suite execution and result model
 
 ## Development

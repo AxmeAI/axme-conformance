@@ -35,6 +35,8 @@ def run_contract_suite(
             _check_inbox_list_contract(client),
             _check_inbox_reply_contract(client),
             _check_inbox_changes_pagination_contract(client),
+            _check_webhooks_subscriptions_contract(client),
+            _check_webhooks_events_contract(client),
         ]
     finally:
         client.close()
@@ -187,6 +189,97 @@ def _check_inbox_changes_pagination_contract(client: httpx.Client) -> ContractRe
     return ContractResult("inbox_changes_pagination", True, "ok")
 
 
+def _check_webhooks_subscriptions_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    upsert_response = client.post(
+        "/v1/webhooks/subscriptions",
+        json={
+            "callback_url": "https://integrator.example/webhooks/axme",
+            "event_types": ["inbox.thread_created"],
+            "active": True,
+            "description": "conformance subscription",
+        },
+    )
+    if upsert_response.status_code != 200:
+        return ContractResult("webhooks_subscriptions", False, f"upsert status={upsert_response.status_code}")
+
+    upsert_data = upsert_response.json()
+    subscription = upsert_data.get("subscription")
+    if upsert_data.get("ok") is not True or not _is_webhook_subscription_shape(subscription):
+        return ContractResult("webhooks_subscriptions", False, "invalid upsert response shape")
+
+    subscription_id = subscription.get("subscription_id")
+    if not _is_uuid(subscription_id):
+        return ContractResult("webhooks_subscriptions", False, "invalid subscription_id in upsert response")
+
+    list_response = client.get("/v1/webhooks/subscriptions", params={"owner_agent": owner_agent})
+    if list_response.status_code != 200:
+        return ContractResult("webhooks_subscriptions", False, f"list status={list_response.status_code}")
+    list_data = list_response.json()
+    subscriptions = list_data.get("subscriptions")
+    if list_data.get("ok") is not True or not isinstance(subscriptions, list):
+        return ContractResult("webhooks_subscriptions", False, "invalid list response shape")
+    if subscriptions and not _is_webhook_subscription_shape(subscriptions[0]):
+        return ContractResult("webhooks_subscriptions", False, "invalid subscription item shape")
+
+    delete_response = client.delete(
+        f"/v1/webhooks/subscriptions/{subscription_id}",
+        params={"owner_agent": owner_agent},
+    )
+    if delete_response.status_code != 200:
+        return ContractResult("webhooks_subscriptions", False, f"delete status={delete_response.status_code}")
+    delete_data = delete_response.json()
+    if delete_data.get("ok") is not True:
+        return ContractResult("webhooks_subscriptions", False, "delete response missing ok=true")
+    if delete_data.get("subscription_id") != subscription_id:
+        return ContractResult("webhooks_subscriptions", False, "deleted subscription_id mismatch")
+    if not isinstance(delete_data.get("revoked_at"), str):
+        return ContractResult("webhooks_subscriptions", False, "delete response missing revoked_at")
+
+    return ContractResult("webhooks_subscriptions", True, "ok")
+
+
+def _check_webhooks_events_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    events_response = client.post(
+        "/v1/webhooks/events",
+        params={"owner_agent": owner_agent},
+        json={
+            "event_type": "inbox.thread_created",
+            "source": "conformance",
+            "payload": {"thread_id": str(uuid4())},
+        },
+    )
+    if events_response.status_code != 200:
+        return ContractResult("webhooks_events", False, f"events status={events_response.status_code}")
+
+    events_data = events_response.json()
+    event_id = events_data.get("event_id")
+    if events_data.get("ok") is not True or not _is_uuid(event_id):
+        return ContractResult("webhooks_events", False, "invalid events response shape")
+    if not _has_webhook_delivery_counters(events_data):
+        return ContractResult("webhooks_events", False, "events response missing delivery counters")
+
+    replay_response = client.post(
+        f"/v1/webhooks/events/{event_id}/replay",
+        params={"owner_agent": owner_agent},
+    )
+    if replay_response.status_code != 200:
+        return ContractResult("webhooks_events", False, f"replay status={replay_response.status_code}")
+
+    replay_data = replay_response.json()
+    if replay_data.get("ok") is not True:
+        return ContractResult("webhooks_events", False, "replay response missing ok=true")
+    if replay_data.get("event_id") != event_id:
+        return ContractResult("webhooks_events", False, "replay response event_id mismatch")
+    if not isinstance(replay_data.get("replayed_at"), str):
+        return ContractResult("webhooks_events", False, "replay response missing replayed_at")
+    if not _has_webhook_delivery_counters(replay_data):
+        return ContractResult("webhooks_events", False, "replay response missing delivery counters")
+
+    return ContractResult("webhooks_events", True, "ok")
+
+
 def _build_intent_create_payload(*, correlation_id: str) -> dict[str, object]:
     return {
         "intent_type": "notify.message.v1",
@@ -203,6 +296,39 @@ def _is_inbox_change_shape(value: object) -> bool:
     cursor = value.get("cursor")
     thread = value.get("thread")
     return isinstance(cursor, str) and len(cursor) >= 3 and _is_thread_shape(thread)
+
+
+def _is_webhook_subscription_shape(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_keys = {
+        "subscription_id",
+        "owner_agent",
+        "callback_url",
+        "event_types",
+        "active",
+        "created_at",
+        "updated_at",
+        "revoked_at",
+        "secret_hint",
+    }
+    if not required_keys.issubset(value.keys()):
+        return False
+    if not _is_uuid(value.get("subscription_id")):
+        return False
+    event_types = value.get("event_types")
+    return isinstance(event_types, list) and len(event_types) >= 1
+
+
+def _has_webhook_delivery_counters(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    counter_keys = ["queued_deliveries", "processed_deliveries", "delivered", "pending", "dead_lettered"]
+    for key in counter_keys:
+        counter = value.get(key)
+        if not isinstance(counter, int) or counter < 0:
+            return False
+    return True
 
 
 def _is_thread_shape(value: object) -> bool:
