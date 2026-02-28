@@ -14,6 +14,7 @@ def test_run_contract_suite_happy_path() -> None:
     intent_id = "22222222-2222-4222-8222-222222222222"
     event_id = "33333333-3333-4333-8333-333333333333"
     subscription_id = "44444444-4444-4444-8444-444444444444"
+    approval_id = "55555555-5555-4555-8555-555555555555"
 
     thread_payload = {
         "thread_id": thread_id,
@@ -88,6 +89,20 @@ def test_run_contract_suite_happy_path() -> None:
         "dead_lettered": 0,
         "replayed_at": "2026-02-28T00:00:02Z",
     }
+    approval_response = {
+        "ok": True,
+        "approval": {
+            "approval_id": approval_id,
+            "decision": "approve",
+            "comment": "approved by conformance",
+            "decided_at": "2026-02-28T00:00:02Z",
+        },
+    }
+    capabilities_response = {
+        "ok": True,
+        "capabilities": ["inbox", "intents", "webhooks"],
+        "supported_intent_types": ["intent.ask.v1", "intent.notify.v1"],
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
@@ -122,6 +137,13 @@ def test_run_contract_suite_happy_path() -> None:
             if request.url.params.get("cursor") == "cur-2":
                 return httpx.Response(200, json=changes_follow_up_payload)
             return httpx.Response(200, json=changes_payload)
+        if request.url.path.startswith("/v1/approvals/") and request.url.path.endswith("/decision"):
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["decision"] == "approve"
+            assert body["comment"] == "approved by conformance"
+            return httpx.Response(200, json=approval_response)
+        if request.url.path == "/v1/capabilities":
+            return httpx.Response(200, json=capabilities_response)
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "POST":
             return httpx.Response(200, json={"ok": True, "subscription": webhook_subscription})
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "GET":
@@ -146,7 +168,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 9
+    assert len(results) == 11
     assert all(r.passed for r in results)
 
 
@@ -163,7 +185,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 9
+    assert len(results) == 11
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -173,3 +195,5 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[6].passed
     assert not results[7].passed
     assert not results[8].passed
+    assert not results[9].passed
+    assert not results[10].passed
