@@ -11,6 +11,8 @@ Initial harness skeleton in progress.
 - Health contract
 - Intent create contract
 - Intent create idempotency/correlation contract
+- Inbox list contract
+- Inbox reply contract
 - Baseline suite execution and result model
 
 ## Development
