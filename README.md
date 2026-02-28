@@ -4,4 +4,17 @@ Conformance suite for API and SDK compatibility checks.
 
 ## Status
 
-Repository bootstrap in progress.
+Initial harness skeleton in progress.
+
+## Scope (Wave 1)
+
+- Health contract
+- Intent create contract
+- Baseline suite execution and result model
+
+## Development
+
+```bash
+python -m pip install -e ".[dev]"
+pytest
+```
