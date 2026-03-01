@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import httpx
 
-from conformance import run_contract_suite
+from conformance import run_contract_suite, run_mcp_contract_suite
 
 
 def test_run_contract_suite_happy_path() -> None:
@@ -646,3 +646,82 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[26].passed
     assert not results[27].passed
     assert not results[28].passed
+
+
+def test_run_mcp_contract_suite_happy_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/mcp" or request.method != "POST":
+            return httpx.Response(404, json={"error": "not_found"})
+        body = json.loads(request.content.decode("utf-8"))
+        method = body.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body.get("id"),
+                    "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": False}}},
+                },
+            )
+        if method == "tools/list":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body.get("id"),
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "axme.check_nick",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "required": ["nick"],
+                                    "properties": {"nick": {"type": "string"}},
+                                },
+                            }
+                        ]
+                    },
+                },
+            )
+        if method == "tools/call":
+            params = body.get("params", {})
+            assert params.get("name") == "axme.check_nick"
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body.get("id"),
+                    "result": {
+                        "ok": True,
+                        "tool": "axme.check_nick",
+                        "status": "completed",
+                        "data": {"ok": True, "available": True},
+                    },
+                },
+            )
+        return httpx.Response(400, json={"error": "unsupported_method"})
+
+    results = run_mcp_contract_suite(
+        base_url="https://api.axme.test",
+        api_key="token",
+        transport_factory=lambda: httpx.MockTransport(handler),
+    )
+    assert len(results) == 3
+    assert all(r.passed for r in results)
+
+
+def test_run_mcp_contract_suite_reports_failures() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/mcp":
+            return httpx.Response(500, json={"error": "down"})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    results = run_mcp_contract_suite(
+        base_url="https://api.axme.test",
+        api_key="token",
+        transport_factory=lambda: httpx.MockTransport(handler),
+    )
+    assert len(results) == 3
+    assert not results[0].passed
+    assert not results[1].passed
+    assert not results[2].passed
