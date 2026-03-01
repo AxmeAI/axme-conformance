@@ -46,6 +46,11 @@ def run_contract_suite(
             _check_media_finalize_upload_contract(client),
             _check_schemas_upsert_contract(client),
             _check_schemas_get_contract(client),
+            _check_users_check_nick_contract(client),
+            _check_users_register_nick_contract(client),
+            _check_users_rename_nick_contract(client),
+            _check_users_profile_get_contract(client),
+            _check_users_profile_update_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
         ]
@@ -525,6 +530,147 @@ def _check_schemas_get_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("schemas_get", False, "missing or invalid field: schema_json")
 
     return ContractResult("schemas_get", True, "ok")
+
+
+def _check_users_check_nick_contract(client: httpx.Client) -> ContractResult:
+    nick = f"@conformance_{uuid4().hex[:10]}"
+    response = client.get("/v1/users/check-nick", params={"nick": nick})
+    if response.status_code != 200:
+        return ContractResult("users_check_nick", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("users_check_nick", False, "missing or invalid field: ok")
+    if data.get("nick") != nick:
+        return ContractResult("users_check_nick", False, "nick mismatch")
+    if not isinstance(data.get("normalized_nick"), str):
+        return ContractResult("users_check_nick", False, "missing or invalid field: normalized_nick")
+    if not isinstance(data.get("public_address"), str):
+        return ContractResult("users_check_nick", False, "missing or invalid field: public_address")
+    if not isinstance(data.get("available"), bool):
+        return ContractResult("users_check_nick", False, "missing or invalid field: available")
+
+    return ContractResult("users_check_nick", True, "ok")
+
+
+def _check_users_register_nick_contract(client: httpx.Client) -> ContractResult:
+    nick = f"@conformance_{uuid4().hex[:10]}"
+    response = client.post(
+        "/v1/users/register-nick",
+        json={"nick": nick, "display_name": "Conformance User"},
+    )
+    if response.status_code != 200:
+        return ContractResult("users_register_nick", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("users_register_nick", False, "missing or invalid field: ok")
+    if not _is_uuid(data.get("user_id")):
+        return ContractResult("users_register_nick", False, "missing or invalid field: user_id")
+    if not isinstance(data.get("owner_agent"), str):
+        return ContractResult("users_register_nick", False, "missing or invalid field: owner_agent")
+    if not isinstance(data.get("nick"), str):
+        return ContractResult("users_register_nick", False, "missing or invalid field: nick")
+    if not isinstance(data.get("public_address"), str):
+        return ContractResult("users_register_nick", False, "missing or invalid field: public_address")
+    if not isinstance(data.get("created_at"), str):
+        return ContractResult("users_register_nick", False, "missing or invalid field: created_at")
+
+    return ContractResult("users_register_nick", True, "ok")
+
+
+def _check_users_rename_nick_contract(client: httpx.Client) -> ContractResult:
+    source_nick = f"@conformance_{uuid4().hex[:10]}"
+    register = client.post(
+        "/v1/users/register-nick",
+        json={"nick": source_nick, "display_name": "Conformance User"},
+    )
+    if register.status_code != 200:
+        return ContractResult("users_rename_nick", False, f"register status={register.status_code}")
+
+    owner_agent = register.json().get("owner_agent")
+    if not isinstance(owner_agent, str):
+        return ContractResult("users_rename_nick", False, "invalid owner_agent from register response")
+
+    new_nick = f"@conformance_{uuid4().hex[:10]}"
+    response = client.post(
+        "/v1/users/rename-nick",
+        json={"owner_agent": owner_agent, "nick": new_nick},
+    )
+    if response.status_code != 200:
+        return ContractResult("users_rename_nick", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("users_rename_nick", False, "missing or invalid field: ok")
+    if data.get("owner_agent") != owner_agent:
+        return ContractResult("users_rename_nick", False, "owner_agent mismatch")
+    if data.get("nick") != new_nick:
+        return ContractResult("users_rename_nick", False, "nick mismatch")
+    if not isinstance(data.get("public_address"), str):
+        return ContractResult("users_rename_nick", False, "missing or invalid field: public_address")
+    if not isinstance(data.get("renamed_at"), str):
+        return ContractResult("users_rename_nick", False, "missing or invalid field: renamed_at")
+
+    return ContractResult("users_rename_nick", True, "ok")
+
+
+def _check_users_profile_get_contract(client: httpx.Client) -> ContractResult:
+    nick = f"@conformance_{uuid4().hex[:10]}"
+    register = client.post(
+        "/v1/users/register-nick",
+        json={"nick": nick, "display_name": "Conformance User"},
+    )
+    if register.status_code != 200:
+        return ContractResult("users_profile_get", False, f"register status={register.status_code}")
+    owner_agent = register.json().get("owner_agent")
+    if not isinstance(owner_agent, str):
+        return ContractResult("users_profile_get", False, "invalid owner_agent from register response")
+
+    response = client.get("/v1/users/profile", params={"owner_agent": owner_agent})
+    if response.status_code != 200:
+        return ContractResult("users_profile_get", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("users_profile_get", False, "missing or invalid field: ok")
+    if data.get("owner_agent") != owner_agent:
+        return ContractResult("users_profile_get", False, "owner_agent mismatch")
+    if not isinstance(data.get("normalized_nick"), str):
+        return ContractResult("users_profile_get", False, "missing or invalid field: normalized_nick")
+    if not isinstance(data.get("updated_at"), str):
+        return ContractResult("users_profile_get", False, "missing or invalid field: updated_at")
+
+    return ContractResult("users_profile_get", True, "ok")
+
+
+def _check_users_profile_update_contract(client: httpx.Client) -> ContractResult:
+    nick = f"@conformance_{uuid4().hex[:10]}"
+    register = client.post(
+        "/v1/users/register-nick",
+        json={"nick": nick, "display_name": "Conformance User"},
+    )
+    if register.status_code != 200:
+        return ContractResult("users_profile_update", False, f"register status={register.status_code}")
+    owner_agent = register.json().get("owner_agent")
+    if not isinstance(owner_agent, str):
+        return ContractResult("users_profile_update", False, "invalid owner_agent from register response")
+
+    response = client.post(
+        "/v1/users/profile/update",
+        json={"owner_agent": owner_agent, "display_name": "Conformance User Updated"},
+    )
+    if response.status_code != 200:
+        return ContractResult("users_profile_update", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("users_profile_update", False, "missing or invalid field: ok")
+    if data.get("owner_agent") != owner_agent:
+        return ContractResult("users_profile_update", False, "owner_agent mismatch")
+    if data.get("display_name") != "Conformance User Updated":
+        return ContractResult("users_profile_update", False, "display_name mismatch")
+    if not isinstance(data.get("updated_at"), str):
+        return ContractResult("users_profile_update", False, "missing or invalid field: updated_at")
+
+    return ContractResult("users_profile_update", True, "ok")
 
 
 def _check_webhooks_subscriptions_contract(client: httpx.Client) -> ContractResult:
