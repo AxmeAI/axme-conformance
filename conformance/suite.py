@@ -44,6 +44,8 @@ def run_contract_suite(
             _check_media_create_upload_contract(client),
             _check_media_get_contract(client),
             _check_media_finalize_upload_contract(client),
+            _check_schemas_upsert_contract(client),
+            _check_schemas_get_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
         ]
@@ -456,6 +458,73 @@ def _check_media_finalize_upload_contract(client: httpx.Client) -> ContractResul
         return ContractResult("media_finalize_upload", False, "missing or invalid field: finalized_at")
 
     return ContractResult("media_finalize_upload", True, "ok")
+
+
+def _check_schemas_upsert_contract(client: httpx.Client) -> ContractResult:
+    semantic_type = "axme.calendar.schedule.v1"
+    response = client.post(
+        "/v1/schemas",
+        json={
+            "semantic_type": semantic_type,
+            "schema_json": {
+                "type": "object",
+                "required": ["date"],
+                "properties": {"date": {"type": "string"}},
+            },
+            "compatibility_mode": "strict",
+        },
+    )
+    if response.status_code != 200:
+        return ContractResult("schemas_upsert", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("schemas_upsert", False, "missing or invalid field: ok")
+    schema = data.get("schema")
+    if not isinstance(schema, dict):
+        return ContractResult("schemas_upsert", False, "missing or invalid field: schema")
+    if schema.get("semantic_type") != semantic_type:
+        return ContractResult("schemas_upsert", False, "semantic_type mismatch")
+    if schema.get("compatibility_mode") not in {"strict", "backward", "warn"}:
+        return ContractResult("schemas_upsert", False, "invalid field: compatibility_mode")
+    if not isinstance(schema.get("schema_hash"), str) or len(schema.get("schema_hash")) != 64:
+        return ContractResult("schemas_upsert", False, "missing or invalid field: schema_hash")
+
+    return ContractResult("schemas_upsert", True, "ok")
+
+
+def _check_schemas_get_contract(client: httpx.Client) -> ContractResult:
+    semantic_type = "axme.calendar.schedule.v1"
+    upsert = client.post(
+        "/v1/schemas",
+        json={
+            "semantic_type": semantic_type,
+            "schema_json": {
+                "type": "object",
+                "required": ["date"],
+                "properties": {"date": {"type": "string"}},
+            },
+            "compatibility_mode": "strict",
+        },
+    )
+    if upsert.status_code != 200:
+        return ContractResult("schemas_get", False, f"upsert status={upsert.status_code}")
+
+    response = client.get(f"/v1/schemas/{semantic_type}")
+    if response.status_code != 200:
+        return ContractResult("schemas_get", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("schemas_get", False, "missing or invalid field: ok")
+    schema = data.get("schema")
+    if not isinstance(schema, dict):
+        return ContractResult("schemas_get", False, "missing or invalid field: schema")
+    if schema.get("semantic_type") != semantic_type:
+        return ContractResult("schemas_get", False, "semantic_type mismatch")
+    if not isinstance(schema.get("schema_json"), dict):
+        return ContractResult("schemas_get", False, "missing or invalid field: schema_json")
+
+    return ContractResult("schemas_get", True, "ok")
 
 
 def _check_webhooks_subscriptions_contract(client: httpx.Client) -> ContractResult:
