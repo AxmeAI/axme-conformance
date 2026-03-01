@@ -12,6 +12,7 @@ def test_run_contract_suite_happy_path() -> None:
     idempotency_cache: dict[str, tuple[str, str]] = {}
     invites: dict[str, dict[str, object]] = {}
     media_uploads: dict[str, dict[str, object]] = {}
+    schemas: dict[str, dict[str, object]] = {}
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -305,6 +306,61 @@ def test_run_contract_suite_happy_path() -> None:
                     "finalized_at": upload["finalized_at"],
                 },
             )
+        if request.url.path == "/v1/schemas" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            semantic_type = body["semantic_type"]
+            schemas[semantic_type] = {
+                "semantic_type": semantic_type,
+                "schema_ref": f"schema://{semantic_type}",
+                "schema_hash": "a" * 64,
+                "compatibility_mode": body["compatibility_mode"],
+                "scope": body.get("scope", "tenant"),
+                "owner_agent": "agent://conformance/owner",
+                "active": body.get("active", True),
+                "schema_json": body["schema_json"],
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:01Z",
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "schema": {
+                        "semantic_type": schemas[semantic_type]["semantic_type"],
+                        "schema_ref": schemas[semantic_type]["schema_ref"],
+                        "schema_hash": schemas[semantic_type]["schema_hash"],
+                        "compatibility_mode": schemas[semantic_type]["compatibility_mode"],
+                        "scope": schemas[semantic_type]["scope"],
+                        "owner_agent": schemas[semantic_type]["owner_agent"],
+                        "active": schemas[semantic_type]["active"],
+                        "created_at": schemas[semantic_type]["created_at"],
+                        "updated_at": schemas[semantic_type]["updated_at"],
+                    },
+                },
+            )
+        if request.url.path.startswith("/v1/schemas/") and request.method == "GET":
+            semantic_type = request.url.path.split("/v1/schemas/")[1]
+            if semantic_type not in schemas:
+                return httpx.Response(404, json={"error": "not_found"})
+            schema = schemas[semantic_type]
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "schema": {
+                        "semantic_type": schema["semantic_type"],
+                        "schema_ref": schema["schema_ref"],
+                        "schema_hash": schema["schema_hash"],
+                        "compatibility_mode": schema["compatibility_mode"],
+                        "scope": schema["scope"],
+                        "owner_agent": schema["owner_agent"],
+                        "active": schema["active"],
+                        "schema_json": schema["schema_json"],
+                        "created_at": schema["created_at"],
+                        "updated_at": schema["updated_at"],
+                    },
+                },
+            )
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "POST":
             return httpx.Response(200, json={"ok": True, "subscription": webhook_subscription})
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "GET":
@@ -329,7 +385,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 17
+    assert len(results) == 19
     assert all(r.passed for r in results)
 
 
@@ -346,7 +402,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 17
+    assert len(results) == 19
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -364,3 +420,5 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[14].passed
     assert not results[15].passed
     assert not results[16].passed
+    assert not results[17].passed
+    assert not results[18].passed
