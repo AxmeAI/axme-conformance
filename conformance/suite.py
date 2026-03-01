@@ -33,9 +33,14 @@ def run_contract_suite(
             _check_trace_header_contract(client),
             _check_intent_create_contract(client),
             _check_intent_create_idempotency_contract(client),
+            _check_intents_get_contract(client),
             _check_inbox_list_contract(client),
+            _check_inbox_thread_contract(client),
             _check_inbox_reply_contract(client),
             _check_inbox_changes_pagination_contract(client),
+            _check_inbox_delegate_contract(client),
+            _check_inbox_decision_contract(client),
+            _check_inbox_messages_delete_contract(client),
             _check_approvals_decision_contract(client),
             _check_capabilities_contract(client),
             _check_invites_create_contract(client),
@@ -129,6 +134,34 @@ def _check_intent_create_idempotency_contract(client: httpx.Client) -> ContractR
     return ContractResult("intent_create_idempotency", True, "ok")
 
 
+def _check_intents_get_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_get", False, f"create status={create_response.status_code}")
+    intent_id = create_response.json().get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_get", False, "invalid intent_id from create response")
+
+    response = client.get(f"/v1/intents/{intent_id}")
+    if response.status_code != 200:
+        return ContractResult("intents_get", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("intents_get", False, "missing or invalid field: ok")
+    intent = data.get("intent")
+    if not isinstance(intent, dict):
+        return ContractResult("intents_get", False, "missing or invalid field: intent")
+    if intent.get("intent_id") != intent_id:
+        return ContractResult("intents_get", False, "intent_id mismatch")
+    if not isinstance(intent.get("intent_type"), str):
+        return ContractResult("intents_get", False, "missing or invalid field: intent_type")
+    if not isinstance(intent.get("payload"), dict):
+        return ContractResult("intents_get", False, "missing or invalid field: payload")
+
+    return ContractResult("intents_get", True, "ok")
+
+
 def _check_inbox_list_contract(client: httpx.Client) -> ContractResult:
     response = client.get("/v1/inbox", params={"owner_agent": "agent://conformance/owner"})
     if response.status_code != 200:
@@ -142,6 +175,33 @@ def _check_inbox_list_contract(client: httpx.Client) -> ContractResult:
     if threads and not _is_thread_shape(threads[0]):
         return ContractResult("inbox_list", False, "invalid thread shape")
     return ContractResult("inbox_list", True, "ok")
+
+
+def _check_inbox_thread_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    list_response = client.get("/v1/inbox", params={"owner_agent": owner_agent})
+    if list_response.status_code != 200:
+        return ContractResult("inbox_thread", False, f"list status={list_response.status_code}")
+    threads = list_response.json().get("threads")
+    if not isinstance(threads, list) or not threads:
+        return ContractResult("inbox_thread", False, "missing or invalid field: threads")
+    thread_id = threads[0].get("thread_id")
+    if not _is_uuid(thread_id):
+        return ContractResult("inbox_thread", False, "missing or invalid field: thread_id")
+
+    response = client.get(f"/v1/inbox/{thread_id}", params={"owner_agent": owner_agent})
+    if response.status_code != 200:
+        return ContractResult("inbox_thread", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("inbox_thread", False, "missing or invalid field: ok")
+    thread = data.get("thread")
+    if not _is_thread_shape(thread):
+        return ContractResult("inbox_thread", False, "invalid thread shape")
+    if thread.get("thread_id") != thread_id:
+        return ContractResult("inbox_thread", False, "thread_id mismatch")
+
+    return ContractResult("inbox_thread", True, "ok")
 
 
 def _check_inbox_reply_contract(client: httpx.Client) -> ContractResult:
@@ -214,6 +274,100 @@ def _check_inbox_changes_pagination_contract(client: httpx.Client) -> ContractRe
             )
 
     return ContractResult("inbox_changes_pagination", True, "ok")
+
+
+def _check_inbox_delegate_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    list_response = client.get("/v1/inbox", params={"owner_agent": owner_agent})
+    if list_response.status_code != 200:
+        return ContractResult("inbox_delegate", False, f"list status={list_response.status_code}")
+    threads = list_response.json().get("threads")
+    if not isinstance(threads, list) or not threads:
+        return ContractResult("inbox_delegate", False, "missing or invalid field: threads")
+    thread_id = threads[0].get("thread_id")
+    if not _is_uuid(thread_id):
+        return ContractResult("inbox_delegate", False, "missing or invalid field: thread_id")
+
+    response = client.post(
+        f"/v1/inbox/{thread_id}/delegate",
+        params={"owner_agent": owner_agent},
+        json={"delegate_to": "agent://conformance/delegate", "note": "handoff"},
+    )
+    if response.status_code != 200:
+        return ContractResult("inbox_delegate", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("inbox_delegate", False, "missing or invalid field: ok")
+    thread = data.get("thread")
+    if not _is_thread_shape(thread):
+        return ContractResult("inbox_delegate", False, "invalid thread shape")
+
+    return ContractResult("inbox_delegate", True, "ok")
+
+
+def _check_inbox_decision_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    list_response = client.get("/v1/inbox", params={"owner_agent": owner_agent})
+    if list_response.status_code != 200:
+        return ContractResult("inbox_decision", False, f"list status={list_response.status_code}")
+    threads = list_response.json().get("threads")
+    if not isinstance(threads, list) or not threads:
+        return ContractResult("inbox_decision", False, "missing or invalid field: threads")
+    thread_id = threads[0].get("thread_id")
+    if not _is_uuid(thread_id):
+        return ContractResult("inbox_decision", False, "missing or invalid field: thread_id")
+
+    response = client.post(
+        f"/v1/inbox/{thread_id}/approve",
+        params={"owner_agent": owner_agent},
+        json={"comment": "approved in conformance"},
+    )
+    if response.status_code != 200:
+        return ContractResult("inbox_decision", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("inbox_decision", False, "missing or invalid field: ok")
+    thread = data.get("thread")
+    if not _is_thread_shape(thread):
+        return ContractResult("inbox_decision", False, "invalid thread shape")
+
+    return ContractResult("inbox_decision", True, "ok")
+
+
+def _check_inbox_messages_delete_contract(client: httpx.Client) -> ContractResult:
+    owner_agent = "agent://conformance/owner"
+    list_response = client.get("/v1/inbox", params={"owner_agent": owner_agent})
+    if list_response.status_code != 200:
+        return ContractResult("inbox_messages_delete", False, f"list status={list_response.status_code}")
+    threads = list_response.json().get("threads")
+    if not isinstance(threads, list) or not threads:
+        return ContractResult("inbox_messages_delete", False, "missing or invalid field: threads")
+    thread_id = threads[0].get("thread_id")
+    if not _is_uuid(thread_id):
+        return ContractResult("inbox_messages_delete", False, "missing or invalid field: thread_id")
+
+    response = client.post(
+        f"/v1/inbox/{thread_id}/messages/delete",
+        params={"owner_agent": owner_agent},
+        json={"mode": "self", "limit": 1},
+    )
+    if response.status_code != 200:
+        return ContractResult("inbox_messages_delete", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("inbox_messages_delete", False, "missing or invalid field: ok")
+    if data.get("mode") not in {"self", "both"}:
+        return ContractResult("inbox_messages_delete", False, "invalid field: mode")
+    if not isinstance(data.get("deleted_count"), int) or data.get("deleted_count") < 0:
+        return ContractResult("inbox_messages_delete", False, "missing or invalid field: deleted_count")
+    message_ids = data.get("message_ids")
+    if not isinstance(message_ids, list):
+        return ContractResult("inbox_messages_delete", False, "missing or invalid field: message_ids")
+    thread = data.get("thread")
+    if not _is_thread_shape(thread):
+        return ContractResult("inbox_messages_delete", False, "invalid thread shape")
+
+    return ContractResult("inbox_messages_delete", True, "ok")
 
 
 def _check_approvals_decision_contract(client: httpx.Client) -> ContractResult:
