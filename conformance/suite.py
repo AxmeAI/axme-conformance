@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from uuid import UUID, uuid4
 from typing import Callable
 
@@ -34,6 +35,10 @@ def run_contract_suite(
             _check_intent_create_contract(client),
             _check_intent_create_idempotency_contract(client),
             _check_intents_get_contract(client),
+            _check_intents_events_contract(client),
+            _check_intents_stream_resume_contract(client),
+            _check_intents_resolve_contract(client),
+            _check_intent_completion_delivery_contract(client),
             _check_inbox_list_contract(client),
             _check_inbox_thread_contract(client),
             _check_inbox_reply_contract(client),
@@ -249,6 +254,171 @@ def _check_intents_get_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("intents_get", False, "missing or invalid field: payload")
 
     return ContractResult("intents_get", True, "ok")
+
+
+def _check_intents_events_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_events", False, f"create status={create_response.status_code}")
+    intent_id = create_response.json().get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_events", False, "invalid intent_id from create response")
+
+    events_response = client.get(f"/v1/intents/{intent_id}/events")
+    if events_response.status_code != 200:
+        return ContractResult("intents_events", False, f"unexpected status={events_response.status_code}")
+    events_data = events_response.json()
+    events = events_data.get("events")
+    if events_data.get("ok") is not True or not isinstance(events, list) or len(events) < 2:
+        return ContractResult("intents_events", False, "missing or invalid field: events")
+
+    seqs: list[int] = []
+    for item in events:
+        if not isinstance(item, dict):
+            return ContractResult("intents_events", False, "invalid event item shape")
+        seq = item.get("seq")
+        event_type = item.get("event_type")
+        if not isinstance(seq, int) or seq < 1:
+            return ContractResult("intents_events", False, "invalid event seq")
+        if not isinstance(event_type, str) or not event_type.startswith("intent."):
+            return ContractResult("intents_events", False, "invalid event_type")
+        seqs.append(seq)
+    if seqs != sorted(seqs):
+        return ContractResult("intents_events", False, "events are not ordered by seq")
+
+    first_seq = seqs[0]
+    since_response = client.get(f"/v1/intents/{intent_id}/events", params={"since": first_seq})
+    if since_response.status_code != 200:
+        return ContractResult("intents_events", False, f"since status={since_response.status_code}")
+    since_events = since_response.json().get("events")
+    if not isinstance(since_events, list):
+        return ContractResult("intents_events", False, "missing or invalid field: since events")
+    if any(not isinstance(item, dict) or not isinstance(item.get("seq"), int) or item["seq"] <= first_seq for item in since_events):
+        return ContractResult("intents_events", False, "since filter returned invalid seq values")
+
+    return ContractResult("intents_events", True, "ok")
+
+
+def _check_intents_stream_resume_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_stream_resume", False, f"create status={create_response.status_code}")
+    intent_id = create_response.json().get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_stream_resume", False, "invalid intent_id from create response")
+
+    stream_response = client.get(
+        f"/v1/intents/{intent_id}/events/stream",
+        params={"since": 1, "wait_seconds": 2},
+    )
+    if stream_response.status_code != 200:
+        return ContractResult("intents_stream_resume", False, f"unexpected status={stream_response.status_code}")
+
+    raw_lines = stream_response.text.splitlines()
+    event_name: str | None = None
+    data_lines: list[str] = []
+    seen_resumed = False
+    for line in raw_lines:
+        if line == "":
+            if event_name and event_name.startswith("intent.") and data_lines:
+                try:
+                    payload = json.loads("\n".join(data_lines))
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict):
+                    seq = payload.get("seq")
+                    if isinstance(seq, int) and seq > 1:
+                        seen_resumed = True
+                        break
+            event_name = None
+            data_lines = []
+            continue
+        if line.startswith("event:"):
+            event_name = line.partition(":")[2].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.partition(":")[2].lstrip())
+            continue
+    if not seen_resumed:
+        return ContractResult("intents_stream_resume", False, "stream did not yield resumed events")
+
+    return ContractResult("intents_stream_resume", True, "ok")
+
+
+def _check_intents_resolve_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_resolve", False, f"create status={create_response.status_code}")
+    intent_id = create_response.json().get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_resolve", False, "invalid intent_id from create response")
+
+    resolve_response = client.post(
+        f"/v1/intents/{intent_id}/resolve",
+        json={"status": "COMPLETED", "result": {"ok": True}},
+    )
+    if resolve_response.status_code != 200:
+        return ContractResult("intents_resolve", False, f"resolve status={resolve_response.status_code}")
+    resolve_data = resolve_response.json()
+    event = resolve_data.get("event")
+    if resolve_data.get("ok") is not True or not isinstance(event, dict):
+        return ContractResult("intents_resolve", False, "invalid resolve response shape")
+    if event.get("event_type") != "intent.completed":
+        return ContractResult("intents_resolve", False, "resolve did not emit terminal completed event")
+    if event.get("status") != "COMPLETED":
+        return ContractResult("intents_resolve", False, "resolve status mismatch")
+
+    second_terminal = client.post(
+        f"/v1/intents/{intent_id}/resolve",
+        json={"status": "CANCELED", "reason": "too late"},
+    )
+    if second_terminal.status_code != 409:
+        return ContractResult("intents_resolve", False, f"expected 409 for second terminal, got={second_terminal.status_code}")
+
+    return ContractResult("intents_resolve", True, "ok")
+
+
+def _check_intent_completion_delivery_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    reply_to = "agent://conformance/reply-target"
+    create_response = client.post(
+        "/v1/intents",
+        json=_build_intent_create_payload(correlation_id=correlation_id, reply_to=reply_to),
+    )
+    if create_response.status_code != 200:
+        return ContractResult("intent_completion_delivery", False, f"create status={create_response.status_code}")
+    intent_id = create_response.json().get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intent_completion_delivery", False, "invalid intent_id from create response")
+
+    resolve_response = client.post(
+        f"/v1/intents/{intent_id}/resolve",
+        json={"status": "COMPLETED", "result": {"ok": True}},
+    )
+    if resolve_response.status_code != 200:
+        return ContractResult("intent_completion_delivery", False, f"resolve status={resolve_response.status_code}")
+    resolve_data = resolve_response.json()
+    completion_delivery = resolve_data.get("completion_delivery")
+    if not isinstance(completion_delivery, dict):
+        return ContractResult("intent_completion_delivery", False, "missing completion_delivery object")
+    if completion_delivery.get("delivered") is not True:
+        return ContractResult("intent_completion_delivery", False, "completion delivery not marked delivered")
+    if completion_delivery.get("reply_to") != reply_to:
+        return ContractResult("intent_completion_delivery", False, "completion delivery reply_to mismatch")
+
+    inbox_response = client.get("/v1/inbox", params={"owner_agent": reply_to})
+    if inbox_response.status_code != 200:
+        return ContractResult("intent_completion_delivery", False, f"inbox status={inbox_response.status_code}")
+    threads = inbox_response.json().get("threads")
+    if not isinstance(threads, list):
+        return ContractResult("intent_completion_delivery", False, "invalid inbox threads payload")
+    if not any(isinstance(thread, dict) and thread.get("thread_id") == intent_id for thread in threads):
+        return ContractResult("intent_completion_delivery", False, "reply_to inbox does not expose completion thread")
+
+    return ContractResult("intent_completion_delivery", True, "ok")
 
 
 def _check_inbox_list_contract(client: httpx.Client) -> ContractResult:
@@ -1022,14 +1192,17 @@ def _mcp_call(client: httpx.Client, payload: dict[str, object]) -> tuple[dict[st
     return data, None
 
 
-def _build_intent_create_payload(*, correlation_id: str) -> dict[str, object]:
-    return {
+def _build_intent_create_payload(*, correlation_id: str, reply_to: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
         "intent_type": "notify.message.v1",
         "correlation_id": correlation_id,
         "from_agent": "agent://conformance/sender",
         "to_agent": "agent://conformance/receiver",
         "payload": {"text": "hello from conformance"},
     }
+    if isinstance(reply_to, str):
+        payload["reply_to"] = reply_to
+    return payload
 
 
 def _is_inbox_change_shape(value: object) -> bool:
