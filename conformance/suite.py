@@ -63,6 +63,29 @@ def run_contract_suite(
         client.close()
 
 
+def run_mcp_contract_suite(
+    *,
+    base_url: str,
+    api_key: str,
+    transport_factory: Callable[[], httpx.BaseTransport] | None = None,
+) -> list[ContractResult]:
+    transport = transport_factory() if transport_factory else None
+    client = httpx.Client(
+        base_url=base_url.rstrip("/"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        transport=transport,
+        timeout=15.0,
+    )
+    try:
+        return [
+            _check_mcp_initialize_contract(client),
+            _check_mcp_tools_list_contract(client),
+            _check_mcp_tools_call_contract(client),
+        ]
+    finally:
+        client.close()
+
+
 def _check_health_contract(client: httpx.Client) -> ContractResult:
     response = client.get("/health")
     if response.status_code != 200:
@@ -82,6 +105,72 @@ def _check_trace_header_contract(client: httpx.Client) -> ContractResult:
     if data.get("ok") is not True:
         return ContractResult("trace_header", False, "missing or invalid field: ok")
     return ContractResult("trace_header", True, "ok")
+
+
+def _check_mcp_initialize_contract(client: httpx.Client) -> ContractResult:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid4()),
+        "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05"},
+    }
+    data, error = _mcp_call(client, payload)
+    if error:
+        return ContractResult("mcp_initialize", False, error)
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return ContractResult("mcp_initialize", False, "missing or invalid field: result")
+    if not isinstance(result.get("protocolVersion"), str):
+        return ContractResult("mcp_initialize", False, "missing or invalid field: protocolVersion")
+    return ContractResult("mcp_initialize", True, "ok")
+
+
+def _check_mcp_tools_list_contract(client: httpx.Client) -> ContractResult:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid4()),
+        "method": "tools/list",
+        "params": {},
+    }
+    data, error = _mcp_call(client, payload)
+    if error:
+        return ContractResult("mcp_tools_list", False, error)
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return ContractResult("mcp_tools_list", False, "missing or invalid field: result")
+    tools = result.get("tools")
+    if not isinstance(tools, list):
+        return ContractResult("mcp_tools_list", False, "missing or invalid field: tools")
+    if tools:
+        first = tools[0]
+        if not isinstance(first, dict):
+            return ContractResult("mcp_tools_list", False, "invalid tools item shape")
+        if not isinstance(first.get("name"), str):
+            return ContractResult("mcp_tools_list", False, "invalid tools item: name")
+    return ContractResult("mcp_tools_list", True, "ok")
+
+
+def _check_mcp_tools_call_contract(client: httpx.Client) -> ContractResult:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid4()),
+        "method": "tools/call",
+        "params": {
+            "name": "axme.check_nick",
+            "arguments": {"nick": "@conformance_mcp"},
+        },
+    }
+    data, error = _mcp_call(client, payload)
+    if error:
+        return ContractResult("mcp_tools_call", False, error)
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return ContractResult("mcp_tools_call", False, "missing or invalid field: result")
+    if not isinstance(result.get("tool"), str):
+        return ContractResult("mcp_tools_call", False, "missing or invalid field: tool")
+    if not isinstance(result.get("status"), str):
+        return ContractResult("mcp_tools_call", False, "missing or invalid field: status")
+    return ContractResult("mcp_tools_call", True, "ok")
 
 
 def _check_intent_create_contract(client: httpx.Client) -> ContractResult:
@@ -916,6 +1005,21 @@ def _check_webhooks_events_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("webhooks_events", False, "replay response missing delivery counters")
 
     return ContractResult("webhooks_events", True, "ok")
+
+
+def _mcp_call(client: httpx.Client, payload: dict[str, object]) -> tuple[dict[str, object], str | None]:
+    response = client.post("/mcp", json=payload)
+    if response.status_code != 200:
+        return {}, f"unexpected status={response.status_code}"
+    data = response.json()
+    if not isinstance(data, dict):
+        return {}, "invalid rpc payload type"
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        code = error.get("code")
+        return {}, f"rpc error code={code} message={message}"
+    return data, None
 
 
 def _build_intent_create_payload(*, correlation_id: str) -> dict[str, object]:
