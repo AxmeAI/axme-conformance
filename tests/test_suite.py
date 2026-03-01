@@ -11,6 +11,8 @@ from conformance import run_contract_suite, run_mcp_contract_suite
 def test_run_contract_suite_happy_path() -> None:
     idempotency_cache: dict[str, tuple[str, str]] = {}
     intents: dict[str, dict[str, object]] = {}
+    intent_events: dict[str, list[dict[str, object]]] = {}
+    reply_threads_by_owner: dict[str, list[dict[str, object]]] = {}
     invites: dict[str, dict[str, object]] = {}
     media_uploads: dict[str, dict[str, object]] = {}
     schemas: dict[str, dict[str, object]] = {}
@@ -125,6 +127,127 @@ def test_run_contract_suite_happy_path() -> None:
             if trace_id is not None:
                 assert isinstance(trace_id, str) and len(trace_id) > 0
             return httpx.Response(200, json={"ok": True})
+        if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/events/stream") and request.method == "GET":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/events/stream")[0]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            since_raw = request.url.params.get("since")
+            since = int(since_raw) if isinstance(since_raw, str) and since_raw.isdigit() else 0
+            sse_lines: list[str] = []
+            for event in intent_events.get(intent_id_from_path, []):
+                seq = event.get("seq")
+                if not isinstance(seq, int) or seq <= since:
+                    continue
+                sse_lines.extend(
+                    [
+                        f"id: {seq}",
+                        f"event: {event.get('event_type')}",
+                        f"data: {json.dumps(event)}",
+                        "",
+                    ]
+                )
+            next_seq = len(intent_events.get(intent_id_from_path, [])) + 1
+            sse_lines.extend(
+                [
+                    "event: stream.timeout",
+                    f"data: {json.dumps({'ok': True, 'next_seq': next_seq})}",
+                    "",
+                ]
+            )
+            return httpx.Response(200, text="\n".join(sse_lines), headers={"content-type": "text/event-stream"})
+        if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/events") and request.method == "GET":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/events")[0]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            events = list(intent_events.get(intent_id_from_path, []))
+            since_raw = request.url.params.get("since")
+            if isinstance(since_raw, str) and since_raw.isdigit():
+                since = int(since_raw)
+                events = [item for item in events if isinstance(item.get("seq"), int) and item["seq"] > since]
+            return httpx.Response(200, json={"ok": True, "events": events})
+        if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/resolve") and request.method == "POST":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/resolve")[0]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            body = json.loads(request.content.decode("utf-8"))
+            status = body.get("status")
+            if status not in {"COMPLETED", "FAILED", "CANCELED"}:
+                return httpx.Response(422, json={"error": "invalid_status"})
+            events = intent_events.setdefault(intent_id_from_path, [])
+            if events and events[-1].get("status") in {"COMPLETED", "FAILED", "CANCELED"}:
+                return httpx.Response(409, json={"error": "intent already in terminal state"})
+            event_type_map = {
+                "COMPLETED": "intent.completed",
+                "FAILED": "intent.failed",
+                "CANCELED": "intent.canceled",
+            }
+            details: dict[str, object]
+            if status == "COMPLETED":
+                details = {"result": body.get("result") if isinstance(body.get("result"), dict) else {}}
+            elif status == "FAILED":
+                details = {"error": body.get("error") if isinstance(body.get("error"), dict) else {}}
+            else:
+                details = {"reason": body.get("reason") if isinstance(body.get("reason"), str) else "canceled"}
+            terminal_event = {
+                "intent_id": intent_id_from_path,
+                "seq": len(events) + 1,
+                "event_type": event_type_map[status],
+                "status": status,
+                "waiting_reason": None,
+                "handler": intents[intent_id_from_path].get("to_agent"),
+                "actor": body.get("actor") or "agent://conformance/resolver",
+                "at": "2026-02-28T00:00:10Z",
+                "details": details,
+            }
+            events.append(terminal_event)
+            intents[intent_id_from_path]["status"] = "failed" if status == "FAILED" else "done"
+            intents[intent_id_from_path]["updated_at"] = "2026-02-28T00:00:10Z"
+            completion_delivery: dict[str, object] = {"delivered": False, "reason": "reply_to_not_set"}
+            reply_to = intents[intent_id_from_path].get("reply_to")
+            if isinstance(reply_to, str) and reply_to:
+                completion_delivery = {
+                    "delivered": True,
+                    "reply_to": reply_to,
+                    "thread_id": intent_id_from_path,
+                    "message_id": str(uuid4()),
+                    "completion": {
+                        "type": terminal_event["event_type"],
+                        "intent_id": intent_id_from_path,
+                        "status": status,
+                    },
+                }
+                reply_threads = reply_threads_by_owner.setdefault(reply_to, [])
+                if not any(thread.get("thread_id") == intent_id_from_path for thread in reply_threads):
+                    reply_threads.append(
+                        {
+                            "thread_id": intent_id_from_path,
+                            "intent_id": intent_id_from_path,
+                            "status": "done",
+                            "owner_agent": reply_to,
+                            "from_agent": "agent://axme.intent-protocol",
+                            "to_agent": reply_to,
+                            "created_at": "2026-02-28T00:00:10Z",
+                            "updated_at": "2026-02-28T00:00:10Z",
+                            "timeline": [
+                                {
+                                    "event_id": str(uuid4()),
+                                    "event_type": "intent_completion_delivered",
+                                    "actor": "gateway",
+                                    "at": "2026-02-28T00:00:10Z",
+                                    "details": {"intent_id": intent_id_from_path},
+                                }
+                            ],
+                        }
+                    )
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "intent": intents[intent_id_from_path],
+                    "event": terminal_event,
+                    "completion_delivery": completion_delivery,
+                },
+            )
         if request.url.path.startswith("/v1/intents/") and request.method == "GET":
             intent_id_from_path = request.url.path.split("/v1/intents/")[1]
             if intent_id_from_path not in intents:
@@ -143,8 +266,33 @@ def test_run_contract_suite_happy_path() -> None:
                     "correlation_id": body.get("correlation_id", str(uuid4())),
                     "from_agent": body.get("from_agent", "agent://conformance/sender"),
                     "to_agent": body.get("to_agent", "agent://conformance/receiver"),
+                    "reply_to": body.get("reply_to"),
                     "payload": body.get("payload") if isinstance(body.get("payload"), dict) else {},
                 }
+                intent_events[intent_id_value] = [
+                    {
+                        "intent_id": intent_id_value,
+                        "seq": 1,
+                        "event_type": "intent.created",
+                        "status": "CREATED",
+                        "waiting_reason": None,
+                        "handler": intents[intent_id_value]["from_agent"],
+                        "actor": intents[intent_id_value]["from_agent"],
+                        "at": "2026-02-28T00:00:00Z",
+                        "details": {"intent_type": intents[intent_id_value]["intent_type"]},
+                    },
+                    {
+                        "intent_id": intent_id_value,
+                        "seq": 2,
+                        "event_type": "intent.submitted",
+                        "status": "SUBMITTED",
+                        "waiting_reason": None,
+                        "handler": intents[intent_id_value]["from_agent"],
+                        "actor": "gateway",
+                        "at": "2026-02-28T00:00:01Z",
+                        "details": {"source": "conformance"},
+                    },
+                ]
 
             idempotency_key = request.headers.get("idempotency-key")
             if idempotency_key:
@@ -164,8 +312,10 @@ def test_run_contract_suite_happy_path() -> None:
             _store_intent(generated_intent_id)
             return httpx.Response(200, json={"intent_id": generated_intent_id})
         if request.url.path == "/v1/inbox":
-            assert request.url.params.get("owner_agent") == "agent://conformance/owner"
-            return httpx.Response(200, json={"ok": True, "threads": [thread_payload]})
+            owner_agent = request.url.params.get("owner_agent")
+            if owner_agent == "agent://conformance/owner":
+                return httpx.Response(200, json={"ok": True, "threads": [thread_payload]})
+            return httpx.Response(200, json={"ok": True, "threads": list(reply_threads_by_owner.get(owner_agent or "", []))})
         if request.url.path == f"/v1/inbox/{thread_id}" and request.method == "GET":
             assert request.url.params.get("owner_agent") == "agent://conformance/owner"
             return httpx.Response(200, json={"ok": True, "thread": thread_payload})
@@ -599,7 +749,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 29
+    assert len(results) == 33
     assert all(r.passed for r in results)
 
 
@@ -616,36 +766,8 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 29
-    assert not results[0].passed
-    assert not results[1].passed
-    assert not results[2].passed
-    assert not results[3].passed
-    assert not results[4].passed
-    assert not results[5].passed
-    assert not results[6].passed
-    assert not results[7].passed
-    assert not results[8].passed
-    assert not results[9].passed
-    assert not results[10].passed
-    assert not results[11].passed
-    assert not results[12].passed
-    assert not results[13].passed
-    assert not results[14].passed
-    assert not results[15].passed
-    assert not results[16].passed
-    assert not results[17].passed
-    assert not results[18].passed
-    assert not results[19].passed
-    assert not results[20].passed
-    assert not results[21].passed
-    assert not results[22].passed
-    assert not results[23].passed
-    assert not results[24].passed
-    assert not results[25].passed
-    assert not results[26].passed
-    assert not results[27].passed
-    assert not results[28].passed
+    assert len(results) == 33
+    assert all(not result.passed for result in results)
 
 
 def test_run_mcp_contract_suite_happy_path() -> None:
