@@ -10,6 +10,7 @@ from conformance import run_contract_suite
 
 def test_run_contract_suite_happy_path() -> None:
     idempotency_cache: dict[str, tuple[str, str]] = {}
+    intents: dict[str, dict[str, object]] = {}
     invites: dict[str, dict[str, object]] = {}
     media_uploads: dict[str, dict[str, object]] = {}
     schemas: dict[str, dict[str, object]] = {}
@@ -124,8 +125,27 @@ def test_run_contract_suite_happy_path() -> None:
             if trace_id is not None:
                 assert isinstance(trace_id, str) and len(trace_id) > 0
             return httpx.Response(200, json={"ok": True})
+        if request.url.path.startswith("/v1/intents/") and request.method == "GET":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            return httpx.Response(200, json={"ok": True, "intent": intents[intent_id_from_path]})
         if request.url.path == "/v1/intents":
             body = json.loads(request.content.decode("utf-8"))
+
+            def _store_intent(intent_id_value: str) -> None:
+                intents[intent_id_value] = {
+                    "intent_id": intent_id_value,
+                    "status": "accepted",
+                    "created_at": "2026-02-28T00:00:00Z",
+                    "updated_at": "2026-02-28T00:00:01Z",
+                    "intent_type": body.get("intent_type", "notify.message.v1"),
+                    "correlation_id": body.get("correlation_id", str(uuid4())),
+                    "from_agent": body.get("from_agent", "agent://conformance/sender"),
+                    "to_agent": body.get("to_agent", "agent://conformance/receiver"),
+                    "payload": body.get("payload") if isinstance(body.get("payload"), dict) else {},
+                }
+
             idempotency_key = request.headers.get("idempotency-key")
             if idempotency_key:
                 payload_signature = json.dumps(body, sort_keys=True)
@@ -133,19 +153,57 @@ def test_run_contract_suite_happy_path() -> None:
                     previous_signature, previous_intent_id = idempotency_cache[idempotency_key]
                     if previous_signature != payload_signature:
                         return httpx.Response(409, json={"error": "idempotency_conflict"})
+                    if previous_intent_id not in intents:
+                        _store_intent(previous_intent_id)
                     return httpx.Response(200, json={"intent_id": previous_intent_id})
                 new_intent_id = str(uuid4())
                 idempotency_cache[idempotency_key] = (payload_signature, new_intent_id)
+                _store_intent(new_intent_id)
                 return httpx.Response(200, json={"intent_id": new_intent_id})
-            return httpx.Response(200, json={"intent_id": str(uuid4())})
+            generated_intent_id = str(uuid4())
+            _store_intent(generated_intent_id)
+            return httpx.Response(200, json={"intent_id": generated_intent_id})
         if request.url.path == "/v1/inbox":
             assert request.url.params.get("owner_agent") == "agent://conformance/owner"
             return httpx.Response(200, json={"ok": True, "threads": [thread_payload]})
+        if request.url.path == f"/v1/inbox/{thread_id}" and request.method == "GET":
+            assert request.url.params.get("owner_agent") == "agent://conformance/owner"
+            return httpx.Response(200, json={"ok": True, "thread": thread_payload})
         if request.url.path == f"/v1/inbox/{thread_id}/reply":
             assert request.url.params.get("owner_agent") == "agent://conformance/owner"
             body = json.loads(request.content.decode("utf-8"))
             assert body["message"] == "ack from conformance"
             return httpx.Response(200, json={"ok": True, "thread": thread_payload})
+        if request.url.path == f"/v1/inbox/{thread_id}/delegate" and request.method == "POST":
+            assert request.url.params.get("owner_agent") == "agent://conformance/owner"
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["delegate_to"] == "agent://conformance/delegate"
+            assert body["note"] == "handoff"
+            delegated_thread = dict(thread_payload)
+            delegated_thread["status"] = "active"
+            return httpx.Response(200, json={"ok": True, "thread": delegated_thread})
+        if request.url.path == f"/v1/inbox/{thread_id}/approve" and request.method == "POST":
+            assert request.url.params.get("owner_agent") == "agent://conformance/owner"
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["comment"] == "approved in conformance"
+            approved_thread = dict(thread_payload)
+            approved_thread["status"] = "active"
+            return httpx.Response(200, json={"ok": True, "thread": approved_thread})
+        if request.url.path == f"/v1/inbox/{thread_id}/messages/delete" and request.method == "POST":
+            assert request.url.params.get("owner_agent") == "agent://conformance/owner"
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["mode"] == "self"
+            assert body["limit"] == 1
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "thread": thread_payload,
+                    "mode": "self",
+                    "deleted_count": 1,
+                    "message_ids": ["msg-1"],
+                },
+            )
         if request.url.path == "/v1/inbox/changes":
             assert request.url.params.get("owner_agent") == "agent://conformance/owner"
             if request.url.params.get("cursor") == "cur-2":
@@ -541,7 +599,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 24
+    assert len(results) == 29
     assert all(r.passed for r in results)
 
 
@@ -558,7 +616,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 24
+    assert len(results) == 29
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -583,3 +641,8 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[21].passed
     assert not results[22].passed
     assert not results[23].passed
+    assert not results[24].passed
+    assert not results[25].passed
+    assert not results[26].passed
+    assert not results[27].passed
+    assert not results[28].passed
