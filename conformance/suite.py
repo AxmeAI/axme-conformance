@@ -41,6 +41,9 @@ def run_contract_suite(
             _check_invites_create_contract(client),
             _check_invites_get_contract(client),
             _check_invites_accept_contract(client),
+            _check_media_create_upload_contract(client),
+            _check_media_get_contract(client),
+            _check_media_finalize_upload_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
         ]
@@ -354,6 +357,105 @@ def _check_invites_accept_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("invites_accept", False, "invalid field: registry_bind_status")
 
     return ContractResult("invites_accept", True, "ok")
+
+
+def _check_media_create_upload_contract(client: httpx.Client) -> ContractResult:
+    response = client.post(
+        "/v1/media/create-upload",
+        json={
+            "owner_agent": "agent://conformance/owner",
+            "filename": "contract.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 12345,
+        },
+    )
+    if response.status_code != 200:
+        return ContractResult("media_create_upload", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("media_create_upload", False, "missing or invalid field: ok")
+    upload_id = data.get("upload_id")
+    if not _is_uuid(upload_id):
+        return ContractResult("media_create_upload", False, "missing or invalid field: upload_id")
+    if data.get("status") != "pending":
+        return ContractResult("media_create_upload", False, "invalid field: status")
+    if not isinstance(data.get("upload_url"), str):
+        return ContractResult("media_create_upload", False, "missing or invalid field: upload_url")
+
+    return ContractResult("media_create_upload", True, "ok")
+
+
+def _check_media_get_contract(client: httpx.Client) -> ContractResult:
+    create_response = client.post(
+        "/v1/media/create-upload",
+        json={
+            "owner_agent": "agent://conformance/owner",
+            "filename": "contract.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 12345,
+        },
+    )
+    if create_response.status_code != 200:
+        return ContractResult("media_get", False, f"create status={create_response.status_code}")
+    upload_id = create_response.json().get("upload_id")
+    if not _is_uuid(upload_id):
+        return ContractResult("media_get", False, "invalid upload_id from create upload response")
+
+    response = client.get(f"/v1/media/{upload_id}")
+    if response.status_code != 200:
+        return ContractResult("media_get", False, f"unexpected status={response.status_code}")
+
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("media_get", False, "missing or invalid field: ok")
+    upload = data.get("upload")
+    if not isinstance(upload, dict):
+        return ContractResult("media_get", False, "missing or invalid field: upload")
+    if upload.get("upload_id") != upload_id:
+        return ContractResult("media_get", False, "upload_id mismatch")
+    if upload.get("status") not in {"pending", "ready", "expired"}:
+        return ContractResult("media_get", False, "invalid field: status")
+
+    return ContractResult("media_get", True, "ok")
+
+
+def _check_media_finalize_upload_contract(client: httpx.Client) -> ContractResult:
+    create_response = client.post(
+        "/v1/media/create-upload",
+        json={
+            "owner_agent": "agent://conformance/owner",
+            "filename": "contract.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 12345,
+        },
+    )
+    if create_response.status_code != 200:
+        return ContractResult("media_finalize_upload", False, f"create status={create_response.status_code}")
+    upload_id = create_response.json().get("upload_id")
+    if not _is_uuid(upload_id):
+        return ContractResult("media_finalize_upload", False, "invalid upload_id from create upload response")
+
+    response = client.post(
+        "/v1/media/finalize-upload",
+        json={
+            "upload_id": upload_id,
+            "size_bytes": 12345,
+        },
+    )
+    if response.status_code != 200:
+        return ContractResult("media_finalize_upload", False, f"unexpected status={response.status_code}")
+    data = response.json()
+    if data.get("ok") is not True:
+        return ContractResult("media_finalize_upload", False, "missing or invalid field: ok")
+    if data.get("upload_id") != upload_id:
+        return ContractResult("media_finalize_upload", False, "upload_id mismatch")
+    if data.get("status") != "ready":
+        return ContractResult("media_finalize_upload", False, "invalid field: status")
+    if not isinstance(data.get("finalized_at"), str):
+        return ContractResult("media_finalize_upload", False, "missing or invalid field: finalized_at")
+
+    return ContractResult("media_finalize_upload", True, "ok")
 
 
 def _check_webhooks_subscriptions_contract(client: httpx.Client) -> ContractResult:

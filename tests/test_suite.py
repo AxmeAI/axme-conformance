@@ -11,7 +11,9 @@ from conformance import run_contract_suite
 def test_run_contract_suite_happy_path() -> None:
     idempotency_cache: dict[str, tuple[str, str]] = {}
     invites: dict[str, dict[str, object]] = {}
+    media_uploads: dict[str, dict[str, object]] = {}
     invite_counter = 0
+    media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
     intent_id = "22222222-2222-4222-8222-222222222222"
     event_id = "33333333-3333-4333-8333-333333333333"
@@ -107,7 +109,7 @@ def test_run_contract_suite_happy_path() -> None:
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal invite_counter
+        nonlocal invite_counter, media_counter
         if request.url.path == "/health":
             trace_id = request.headers.get("x-trace-id")
             if trace_id is not None:
@@ -230,6 +232,79 @@ def test_run_contract_suite_happy_path() -> None:
                     "registry_bind_status": "propagated",
                 },
             )
+        if request.url.path == "/v1/media/create-upload" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["owner_agent"] == "agent://conformance/owner"
+            assert body["filename"] == "contract.pdf"
+            assert body["mime_type"] == "application/pdf"
+            assert body["size_bytes"] == 12345
+            media_counter += 1
+            upload_id = f"77777777-7777-4777-8777-{media_counter:012d}"
+            media_uploads[upload_id] = {
+                "upload_id": upload_id,
+                "owner_agent": "agent://conformance/owner",
+                "bucket": "axme-media",
+                "object_path": f"agent-conformance/contract-{media_counter}.pdf",
+                "mime_type": "application/pdf",
+                "filename": "contract.pdf",
+                "size_bytes": 12345,
+                "sha256": None,
+                "status": "pending",
+                "created_at": "2026-02-28T00:00:00Z",
+                "expires_at": "2026-03-01T00:00:00Z",
+                "finalized_at": None,
+                "download_url": None,
+                "preview_url": None,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "upload_id": upload_id,
+                    "owner_agent": "agent://conformance/owner",
+                    "bucket": "axme-media",
+                    "object_path": f"agent-conformance/contract-{media_counter}.pdf",
+                    "upload_url": f"https://upload.example/media/{media_counter}",
+                    "status": "pending",
+                    "expires_at": "2026-03-01T00:00:00Z",
+                    "max_size_bytes": 10485760,
+                },
+            )
+        if request.url.path.startswith("/v1/media/") and request.method == "GET":
+            upload_id = request.url.path.split("/")[-1]
+            if upload_id not in media_uploads:
+                return httpx.Response(404, json={"error": "not_found"})
+            return httpx.Response(200, json={"ok": True, "upload": media_uploads[upload_id]})
+        if request.url.path == "/v1/media/finalize-upload" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            upload_id = body["upload_id"]
+            assert body["size_bytes"] == 12345
+            if upload_id not in media_uploads:
+                return httpx.Response(404, json={"error": "not_found"})
+            media_uploads[upload_id].update(
+                {
+                    "status": "ready",
+                    "finalized_at": "2026-02-28T00:00:10Z",
+                    "download_url": f"https://download.example/media/{upload_id}",
+                    "preview_url": f"https://preview.example/media/{upload_id}",
+                }
+            )
+            upload = media_uploads[upload_id]
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "upload_id": upload_id,
+                    "owner_agent": upload["owner_agent"],
+                    "bucket": upload["bucket"],
+                    "object_path": upload["object_path"],
+                    "mime_type": upload["mime_type"],
+                    "size_bytes": upload["size_bytes"],
+                    "sha256": upload["sha256"],
+                    "status": "ready",
+                    "finalized_at": upload["finalized_at"],
+                },
+            )
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "POST":
             return httpx.Response(200, json={"ok": True, "subscription": webhook_subscription})
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "GET":
@@ -254,7 +329,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 14
+    assert len(results) == 17
     assert all(r.passed for r in results)
 
 
@@ -271,7 +346,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 14
+    assert len(results) == 17
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -286,3 +361,6 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[11].passed
     assert not results[12].passed
     assert not results[13].passed
+    assert not results[14].passed
+    assert not results[15].passed
+    assert not results[16].passed
