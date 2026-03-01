@@ -13,6 +13,8 @@ def test_run_contract_suite_happy_path() -> None:
     invites: dict[str, dict[str, object]] = {}
     media_uploads: dict[str, dict[str, object]] = {}
     schemas: dict[str, dict[str, object]] = {}
+    users_by_owner: dict[str, dict[str, object]] = {}
+    user_owner_by_normalized_nick: dict[str, str] = {}
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -108,6 +110,12 @@ def test_run_contract_suite_happy_path() -> None:
         "capabilities": ["inbox", "intents", "webhooks"],
         "supported_intent_types": ["intent.ask.v1", "intent.notify.v1"],
     }
+
+    def normalize_nick(value: str) -> str:
+        return value.strip().lstrip("@").lower()
+
+    def make_public_address(normalized_nick: str) -> str:
+        return f"{normalized_nick}@ax"
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal invite_counter, media_counter
@@ -361,6 +369,154 @@ def test_run_contract_suite_happy_path() -> None:
                     },
                 },
             )
+        if request.url.path == "/v1/users/check-nick" and request.method == "GET":
+            nick_value = request.url.params.get("nick")
+            assert isinstance(nick_value, str) and len(nick_value) > 0
+            normalized_nick = normalize_nick(nick_value)
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "nick": f"@{normalized_nick}",
+                    "normalized_nick": normalized_nick,
+                    "public_address": make_public_address(normalized_nick),
+                    "available": normalized_nick not in user_owner_by_normalized_nick,
+                },
+            )
+        if request.url.path == "/v1/users/register-nick" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            normalized_nick = normalize_nick(body["nick"])
+            if normalized_nick in user_owner_by_normalized_nick:
+                return httpx.Response(409, json={"error": "nick already registered"})
+            user_id = str(uuid4())
+            owner_agent = f"agent://user/{user_id}"
+            created_at = "2026-02-28T00:00:00Z"
+            record = {
+                "user_id": user_id,
+                "owner_agent": owner_agent,
+                "nick": f"@{normalized_nick}",
+                "normalized_nick": normalized_nick,
+                "public_address": make_public_address(normalized_nick),
+                "display_name": body.get("display_name"),
+                "phone": body.get("phone"),
+                "email": body.get("email"),
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+            users_by_owner[owner_agent] = record
+            user_owner_by_normalized_nick[normalized_nick] = owner_agent
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user_id": record["user_id"],
+                    "owner_agent": record["owner_agent"],
+                    "nick": record["nick"],
+                    "public_address": record["public_address"],
+                    "display_name": record["display_name"],
+                    "phone": record["phone"],
+                    "email": record["email"],
+                    "created_at": record["created_at"],
+                },
+            )
+        if request.url.path == "/v1/users/rename-nick" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            owner_agent = body["owner_agent"]
+            if owner_agent not in users_by_owner:
+                return httpx.Response(404, json={"error": "owner not found"})
+            user = users_by_owner[owner_agent]
+            normalized_nick = normalize_nick(body["nick"])
+            existing_owner = user_owner_by_normalized_nick.get(normalized_nick)
+            if existing_owner is not None and existing_owner != owner_agent:
+                return httpx.Response(409, json={"error": "nick already registered"})
+            old_normalized_nick = user["normalized_nick"]
+            if isinstance(old_normalized_nick, str):
+                user_owner_by_normalized_nick.pop(old_normalized_nick, None)
+            user_owner_by_normalized_nick[normalized_nick] = owner_agent
+            user["nick"] = f"@{normalized_nick}"
+            user["normalized_nick"] = normalized_nick
+            user["public_address"] = make_public_address(normalized_nick)
+            if "display_name" in body:
+                user["display_name"] = body.get("display_name")
+            if "phone" in body:
+                user["phone"] = body.get("phone")
+            if "email" in body:
+                user["email"] = body.get("email")
+            user["updated_at"] = "2026-02-28T00:00:01Z"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user_id": user["user_id"],
+                    "owner_agent": user["owner_agent"],
+                    "nick": user["nick"],
+                    "public_address": user["public_address"],
+                    "display_name": user["display_name"],
+                    "phone": user["phone"],
+                    "email": user["email"],
+                    "renamed_at": user["updated_at"],
+                },
+            )
+        if request.url.path == "/v1/users/profile" and request.method == "GET":
+            owner_agent = request.url.params.get("owner_agent")
+            if owner_agent is None or owner_agent not in users_by_owner:
+                return httpx.Response(404, json={"error": "owner not found"})
+            user = users_by_owner[owner_agent]
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user_id": user["user_id"],
+                    "owner_agent": user["owner_agent"],
+                    "nick": user["nick"],
+                    "normalized_nick": user["normalized_nick"],
+                    "public_address": user["public_address"],
+                    "display_name": user["display_name"],
+                    "phone": user["phone"],
+                    "email": user["email"],
+                    "updated_at": user["updated_at"],
+                },
+            )
+        if request.url.path == "/v1/users/profile/update" and request.method == "POST":
+            body = json.loads(request.content.decode("utf-8"))
+            owner_agent = body["owner_agent"]
+            if owner_agent not in users_by_owner:
+                return httpx.Response(404, json={"error": "owner not found"})
+            user = users_by_owner[owner_agent]
+            if "nick" in body and body["nick"] is not None:
+                normalized_nick = normalize_nick(body["nick"])
+                existing_owner = user_owner_by_normalized_nick.get(normalized_nick)
+                if existing_owner is not None and existing_owner != owner_agent:
+                    return httpx.Response(409, json={"error": "nick already registered"})
+                old_normalized_nick = user["normalized_nick"]
+                if isinstance(old_normalized_nick, str):
+                    user_owner_by_normalized_nick.pop(old_normalized_nick, None)
+                user_owner_by_normalized_nick[normalized_nick] = owner_agent
+                user["nick"] = f"@{normalized_nick}"
+                user["normalized_nick"] = normalized_nick
+                user["public_address"] = make_public_address(normalized_nick)
+            if "display_name" in body:
+                user["display_name"] = body.get("display_name")
+            if "phone" in body:
+                user["phone"] = body.get("phone")
+            if "email" in body:
+                user["email"] = body.get("email")
+            user["updated_at"] = "2026-02-28T00:00:03Z"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user_id": user["user_id"],
+                    "owner_agent": user["owner_agent"],
+                    "nick": user["nick"],
+                    "normalized_nick": user["normalized_nick"],
+                    "public_address": user["public_address"],
+                    "display_name": user["display_name"],
+                    "phone": user["phone"],
+                    "email": user["email"],
+                    "updated_at": user["updated_at"],
+                },
+            )
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "POST":
             return httpx.Response(200, json={"ok": True, "subscription": webhook_subscription})
         if request.url.path == "/v1/webhooks/subscriptions" and request.method == "GET":
@@ -385,7 +541,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 19
+    assert len(results) == 24
     assert all(r.passed for r in results)
 
 
@@ -402,7 +558,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 19
+    assert len(results) == 24
     assert not results[0].passed
     assert not results[1].passed
     assert not results[2].passed
@@ -422,3 +578,8 @@ def test_run_contract_suite_reports_failures() -> None:
     assert not results[16].passed
     assert not results[17].passed
     assert not results[18].passed
+    assert not results[19].passed
+    assert not results[20].passed
+    assert not results[21].passed
+    assert not results[22].passed
+    assert not results[23].passed
