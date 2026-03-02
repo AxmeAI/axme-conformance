@@ -22,6 +22,9 @@ def test_run_contract_suite_happy_path() -> None:
     workspaces: dict[str, dict[str, object]] = {}
     access_requests: dict[str, dict[str, object]] = {}
     quota_policies: dict[tuple[str, str], dict[str, object]] = {}
+    service_accounts: dict[str, dict[str, object]] = {}
+    service_account_keys: dict[str, dict[str, object]] = {}
+    intent_usage_by_scope: dict[tuple[str, str], int] = {}
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -335,9 +338,14 @@ def test_run_contract_suite_happy_path() -> None:
                 return httpx.Response(404, json={"error": "quota not found"})
             dimensions = quota_policy["dimensions"]
             assert isinstance(dimensions, dict)
+            current_intents_used = intent_usage_by_scope.get((org_id, workspace_id), 0)
             usage_dimensions = {
                 "requests_per_minute": build_usage_window(int(dimensions["requests_per_minute"])),
-                "intents_per_day": build_usage_window(int(dimensions["intents_per_day"])),
+                "intents_per_day": {
+                    "used": current_intents_used,
+                    "limit": int(dimensions["intents_per_day"]),
+                    "remaining": int(dimensions["intents_per_day"]) - current_intents_used,
+                },
                 "inbox_writes_per_day": build_usage_window(int(dimensions["inbox_writes_per_day"])),
                 "media_upload_bytes_per_day": build_usage_window(int(dimensions["media_upload_bytes_per_day"])),
                 "media_storage_bytes": build_usage_window(int(dimensions["media_storage_bytes"])),
@@ -357,6 +365,118 @@ def test_run_contract_suite_happy_path() -> None:
                     },
                 },
             )
+        if request.url.path == "/v1/usage/timeseries" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            workspace = workspaces.get(workspace_id)
+            if workspace is None:
+                return httpx.Response(404, json={"error": "workspace not found"})
+            if workspace["org_id"] != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            current_intents_used = intent_usage_by_scope.get((org_id, workspace_id), 0)
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "series": {
+                        "org_id": org_id,
+                        "workspace_id": workspace_id,
+                        "granularity": "day",
+                        "points": [
+                            {
+                                "at": "2026-02-28T00:00:00Z",
+                                "dimensions": {
+                                    "requests_per_minute": 0,
+                                    "intents_per_day": current_intents_used,
+                                    "inbox_writes_per_day": 0,
+                                    "media_upload_bytes_per_day": 0,
+                                    "media_storage_bytes": 0,
+                                    "webhook_deliveries_per_day": 0,
+                                    "schema_writes_per_day": 0,
+                                },
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path == "/v1/service-accounts" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = body.get("org_id")
+            workspace_id = body.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            workspace = workspaces.get(workspace_id)
+            if workspace is None or workspace["org_id"] != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            service_account_id = f"sa_{uuid4().hex[:24]}"
+            service_account = {
+                "service_account_id": service_account_id,
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "name": body["name"],
+                "description": body.get("description"),
+                "status": "active",
+                "created_by_actor_id": body["created_by_actor_id"],
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+            }
+            service_accounts[service_account_id] = service_account
+            return httpx.Response(200, json={"ok": True, "service_account": service_account})
+        if request.url.path == "/v1/service-accounts" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            if not isinstance(org_id, str):
+                return httpx.Response(422, json={"error": "missing org_id"})
+            items = [
+                account
+                for account in service_accounts.values()
+                if account.get("org_id") == org_id and (workspace_id is None or account.get("workspace_id") == workspace_id)
+            ]
+            return httpx.Response(200, json={"ok": True, "service_accounts": items})
+        if request.url.path.startswith("/v1/service-accounts/") and request.url.path.endswith("/keys") and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            service_account_id = request.url.path.split("/v1/service-accounts/")[1].split("/keys")[0]
+            if service_account_id not in service_accounts:
+                return httpx.Response(404, json={"error": "service_account_not_found"})
+            key_id = f"sak_{uuid4().hex[:24]}"
+            key_payload = {
+                "key_id": key_id,
+                "service_account_id": service_account_id,
+                "key_hint": key_id[:8],
+                "status": "active",
+                "created_at": "2026-02-28T00:00:00Z",
+                "expires_at": None,
+                "token": f"axme_sa_{service_account_id}_{uuid4().hex}",
+            }
+            service_account_keys[key_id] = key_payload
+            return httpx.Response(200, json={"ok": True, "key": key_payload})
+        if (
+            request.url.path.startswith("/v1/service-accounts/")
+            and "/keys/" in request.url.path
+            and request.url.path.endswith("/revoke")
+            and request.method == "POST"
+        ):
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            parts = [part for part in request.url.path.split("/") if part]
+            service_account_id = parts[2]
+            key_id = parts[4]
+            if service_account_id not in service_accounts or key_id not in service_account_keys:
+                return httpx.Response(404, json={"error": "not_found"})
+            key_payload = dict(service_account_keys[key_id])
+            key_payload["status"] = "revoked"
+            key_payload["revoked_at"] = "2026-02-28T00:00:05Z"
+            service_account_keys[key_id] = key_payload
+            return httpx.Response(200, json={"ok": True, "key": key_payload})
         if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/events/stream") and request.method == "GET":
             intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/events/stream")[0]
             if intent_id_from_path not in intents:
@@ -485,6 +605,30 @@ def test_run_contract_suite_happy_path() -> None:
             return httpx.Response(200, json={"ok": True, "intent": intents[intent_id_from_path]})
         if request.url.path == "/v1/intents":
             body = json.loads(request.content.decode("utf-8"))
+            payload_section = body.get("payload")
+            quota_scope: tuple[str, str] | None = None
+            if isinstance(payload_section, dict):
+                tenant_section = payload_section.get("tenant")
+                if isinstance(tenant_section, dict):
+                    tenant_org_id = tenant_section.get("org_id")
+                    tenant_workspace_id = tenant_section.get("workspace_id")
+                    if isinstance(tenant_org_id, str) and isinstance(tenant_workspace_id, str):
+                        quota_scope = (tenant_org_id, tenant_workspace_id)
+            if quota_scope is not None:
+                quota_policy = quota_policies.get(quota_scope)
+                if quota_policy is not None:
+                    dimensions = quota_policy.get("dimensions")
+                    if isinstance(dimensions, dict):
+                        intents_limit = dimensions.get("intents_per_day")
+                        current_usage = intent_usage_by_scope.get(quota_scope, 0)
+                        if (
+                            quota_policy.get("hard_enforcement") is True
+                            and quota_policy.get("overage_mode") == "block"
+                            and isinstance(intents_limit, int)
+                            and intents_limit >= 0
+                            and current_usage >= intents_limit
+                        ):
+                            return httpx.Response(429, json={"detail": "quota exceeded for intents_per_day"})
 
             def _store_intent(intent_id_value: str) -> None:
                 intents[intent_id_value] = {
@@ -548,9 +692,13 @@ def test_run_contract_suite_happy_path() -> None:
                 new_intent_id = str(uuid4())
                 idempotency_cache[idempotency_key] = (payload_signature, new_intent_id)
                 _store_intent(new_intent_id)
+                if quota_scope is not None:
+                    intent_usage_by_scope[quota_scope] = intent_usage_by_scope.get(quota_scope, 0) + 1
                 return httpx.Response(200, json={"intent_id": new_intent_id, "status": intents[new_intent_id]["status"]})
             generated_intent_id = str(uuid4())
             _store_intent(generated_intent_id)
+            if quota_scope is not None:
+                intent_usage_by_scope[quota_scope] = intent_usage_by_scope.get(quota_scope, 0) + 1
             return httpx.Response(200, json={"intent_id": generated_intent_id, "status": intents[generated_intent_id]["status"]})
         if request.url.path == "/v1/inbox":
             owner_agent = request.url.params.get("owner_agent")
@@ -990,7 +1138,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 39
+    assert len(results) == 40
     assert all(r.passed for r in results)
 
 
@@ -1007,7 +1155,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 39
+    assert len(results) == 40
     assert all(not result.passed for result in results)
 
 
