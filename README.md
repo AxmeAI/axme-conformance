@@ -26,6 +26,7 @@ Initial harness skeleton in progress.
 - Enterprise access requests smoke contract
 - Enterprise quotas and usage smoke contract
 - Enterprise usage timeseries and strict quota enforcement contract
+- Enterprise naming/routing/transports/deliveries contract (resolver chain + replay)
 - Enterprise service-account lifecycle smoke contract
 - Enterprise tenant-boundary and permission error contract
 - Baseline suite execution and result model

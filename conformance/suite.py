@@ -90,6 +90,7 @@ def run_contract_suite(
             _check_enterprise_access_requests_contract(client),
             _check_enterprise_quotas_usage_contract(client),
             _check_enterprise_service_accounts_contract(client),
+            _check_enterprise_naming_routing_delivery_contract(client),
             _check_enterprise_tenant_boundary_and_permission_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
@@ -1563,6 +1564,149 @@ def _check_enterprise_service_accounts_contract(client: httpx.Client) -> Contrac
     if revoked_key.get("status") != "revoked":
         return ContractResult("enterprise_service_accounts", False, "service-account key revoke did not set status=revoked")
     return ContractResult("enterprise_service_accounts", True, "ok")
+
+
+def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> ContractResult:
+    org_id, error = _create_enterprise_organization_for_contract(client, name="Conformance Routing Org")
+    if error:
+        return ContractResult("enterprise_naming_routing_delivery", False, error)
+    assert org_id is not None
+    workspace_id, workspace_error = _create_enterprise_workspace_for_contract(
+        client,
+        org_id=org_id,
+        name="Conformance Routing Workspace",
+    )
+    if workspace_error:
+        return ContractResult("enterprise_naming_routing_delivery", False, workspace_error)
+    assert workspace_id is not None
+
+    principal_response = client.post(
+        "/v1/principals",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "principal_type": "service_agent",
+            "display_name": "conformance-router",
+        },
+    )
+    if principal_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"principal create status={principal_response.status_code}",
+        )
+    principal_payload = principal_response.json().get("principal")
+    if not isinstance(principal_payload, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid principal response shape")
+    principal_id = principal_payload.get("principal_id")
+    if not isinstance(principal_id, str) or len(principal_id) < 8:
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid principal_id")
+
+    alias_response = client.post(
+        "/v1/aliases",
+        json={
+            "principal_id": principal_id,
+            "alias": "agent://conformance/router",
+            "alias_type": "service",
+        },
+    )
+    if alias_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"alias bind status={alias_response.status_code}")
+    alias_payload = alias_response.json().get("alias")
+    if not isinstance(alias_payload, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid alias response shape")
+
+    route_response = client.post(
+        "/v1/routing/endpoints",
+        json={
+            "principal_id": principal_id,
+            "transport_type": "http",
+            "endpoint_url": "https://conformance-router.example/intents",
+            "auth_mode": "jwt",
+            "priority": 10,
+        },
+    )
+    if route_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"routing endpoint register status={route_response.status_code}",
+        )
+    route_payload = route_response.json().get("route")
+    if not isinstance(route_payload, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid route response shape")
+    route_id = route_payload.get("route_id")
+    if not isinstance(route_id, str) or len(route_id) < 8:
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid route_id")
+
+    binding_response = client.post(
+        "/v1/transports/bindings",
+        json={
+            "principal_id": principal_id,
+            "transport_type": "http",
+            "transport_handle": "https://conformance-router.example/intents",
+            "priority": 10,
+            "status": "active",
+        },
+    )
+    if binding_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"transport binding upsert status={binding_response.status_code}",
+        )
+
+    resolve_response = client.post(
+        "/v1/routing/resolve",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "alias": "agent://conformance/router",
+        },
+    )
+    if resolve_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"routing resolve status={resolve_response.status_code}")
+    resolution = resolve_response.json().get("resolution")
+    if not isinstance(resolution, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid routing resolution response shape")
+    selected_route = resolution.get("selected_route")
+    if not isinstance(selected_route, dict) or selected_route.get("route_id") != route_id:
+        return ContractResult("enterprise_naming_routing_delivery", False, "routing resolve selected route mismatch")
+    resolver_chain = resolution.get("resolver_chain")
+    if resolver_chain != ["alias", "principal_id", "endpoint_route", "transport_dispatch"]:
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid resolver_chain")
+
+    delivery_response = client.post(
+        "/v1/deliveries",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "alias": "agent://conformance/router",
+            "payload": {"event": "conformance.delivery"},
+            "idempotency_key": f"conformance-dlv-{uuid4()}",
+        },
+    )
+    if delivery_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"delivery submit status={delivery_response.status_code}")
+    delivery = delivery_response.json().get("delivery")
+    if not isinstance(delivery, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid delivery response shape")
+    delivery_id = delivery.get("delivery_id")
+    if not isinstance(delivery_id, str) or len(delivery_id) < 8:
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid delivery_id")
+    if delivery.get("route_id") != route_id:
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery route_id mismatch")
+
+    replay_response = client.post(f"/v1/deliveries/{delivery_id}/replay")
+    if replay_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"delivery replay status={replay_response.status_code}")
+    replay_delivery = replay_response.json().get("delivery")
+    if not isinstance(replay_delivery, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid delivery replay response shape")
+    if replay_delivery.get("replay_of_delivery_id") != delivery_id:
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery replay linkage mismatch")
+
+    return ContractResult("enterprise_naming_routing_delivery", True, "ok")
 
 
 def _check_enterprise_tenant_boundary_and_permission_contract(client: httpx.Client) -> ContractResult:
