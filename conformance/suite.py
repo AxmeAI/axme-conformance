@@ -15,6 +15,19 @@ class ContractResult:
     details: str
 
 
+CANONICAL_INTENT_STATUSES = {
+    "CREATED",
+    "SUBMITTED",
+    "DELIVERED",
+    "ACKNOWLEDGED",
+    "IN_PROGRESS",
+    "WAITING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELED",
+}
+
+
 def run_contract_suite(
     *,
     base_url: str,
@@ -188,6 +201,8 @@ def _check_intent_create_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("intent_create", False, "missing field: intent_id")
     if not _is_uuid(data["intent_id"]):
         return ContractResult("intent_create", False, "intent_id is not UUID")
+    if data.get("status") not in CANONICAL_INTENT_STATUSES:
+        return ContractResult("intent_create", False, "create status is not canonical lifecycle status")
     return ContractResult("intent_create", True, "ok")
 
 
@@ -252,6 +267,8 @@ def _check_intents_get_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("intents_get", False, "missing or invalid field: intent_type")
     if not isinstance(intent.get("payload"), dict):
         return ContractResult("intents_get", False, "missing or invalid field: payload")
+    if intent.get("status") not in CANONICAL_INTENT_STATUSES:
+        return ContractResult("intents_get", False, "intent.status is not canonical lifecycle status")
 
     return ContractResult("intents_get", True, "ok")
 
@@ -283,9 +300,19 @@ def _check_intents_events_contract(client: httpx.Client) -> ContractResult:
             return ContractResult("intents_events", False, "invalid event seq")
         if not isinstance(event_type, str) or not event_type.startswith("intent."):
             return ContractResult("intents_events", False, "invalid event_type")
+        if item.get("status") not in CANONICAL_INTENT_STATUSES:
+            return ContractResult("intents_events", False, "event status is not canonical lifecycle status")
         seqs.append(seq)
     if seqs != sorted(seqs):
         return ContractResult("intents_events", False, "events are not ordered by seq")
+    expected_prefix = ["intent.created", "intent.submitted", "intent.delivered"]
+    observed_prefix = [item.get("event_type") for item in events[:3]]
+    if observed_prefix != expected_prefix:
+        return ContractResult(
+            "intents_events",
+            False,
+            f"unexpected lifecycle prefix: {observed_prefix}",
+        )
 
     first_seq = seqs[0]
     since_response = client.get(f"/v1/intents/{intent_id}/events", params={"since": first_seq})
@@ -370,6 +397,9 @@ def _check_intents_resolve_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("intents_resolve", False, "resolve did not emit terminal completed event")
     if event.get("status") != "COMPLETED":
         return ContractResult("intents_resolve", False, "resolve status mismatch")
+    resolved_intent = resolve_data.get("intent")
+    if not isinstance(resolved_intent, dict) or resolved_intent.get("status") != "COMPLETED":
+        return ContractResult("intents_resolve", False, "resolved intent projection is not terminal canonical status")
 
     second_terminal = client.post(
         f"/v1/intents/{intent_id}/resolve",

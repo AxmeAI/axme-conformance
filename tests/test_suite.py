@@ -200,7 +200,7 @@ def test_run_contract_suite_happy_path() -> None:
                 "details": details,
             }
             events.append(terminal_event)
-            intents[intent_id_from_path]["status"] = "failed" if status == "FAILED" else "done"
+            intents[intent_id_from_path]["status"] = status
             intents[intent_id_from_path]["updated_at"] = "2026-02-28T00:00:10Z"
             completion_delivery: dict[str, object] = {"delivered": False, "reason": "reply_to_not_set"}
             reply_to = intents[intent_id_from_path].get("reply_to")
@@ -259,7 +259,7 @@ def test_run_contract_suite_happy_path() -> None:
             def _store_intent(intent_id_value: str) -> None:
                 intents[intent_id_value] = {
                     "intent_id": intent_id_value,
-                    "status": "accepted",
+                    "status": "DELIVERED",
                     "created_at": "2026-02-28T00:00:00Z",
                     "updated_at": "2026-02-28T00:00:01Z",
                     "intent_type": body.get("intent_type", "notify.message.v1"),
@@ -292,6 +292,17 @@ def test_run_contract_suite_happy_path() -> None:
                         "at": "2026-02-28T00:00:01Z",
                         "details": {"source": "conformance"},
                     },
+                    {
+                        "intent_id": intent_id_value,
+                        "seq": 3,
+                        "event_type": "intent.delivered",
+                        "status": "DELIVERED",
+                        "waiting_reason": None,
+                        "handler": intents[intent_id_value]["to_agent"],
+                        "actor": "gateway",
+                        "at": "2026-02-28T00:00:01Z",
+                        "details": {"source": "conformance"},
+                    },
                 ]
 
             idempotency_key = request.headers.get("idempotency-key")
@@ -303,14 +314,14 @@ def test_run_contract_suite_happy_path() -> None:
                         return httpx.Response(409, json={"error": "idempotency_conflict"})
                     if previous_intent_id not in intents:
                         _store_intent(previous_intent_id)
-                    return httpx.Response(200, json={"intent_id": previous_intent_id})
+                    return httpx.Response(200, json={"intent_id": previous_intent_id, "status": intents[previous_intent_id]["status"]})
                 new_intent_id = str(uuid4())
                 idempotency_cache[idempotency_key] = (payload_signature, new_intent_id)
                 _store_intent(new_intent_id)
-                return httpx.Response(200, json={"intent_id": new_intent_id})
+                return httpx.Response(200, json={"intent_id": new_intent_id, "status": intents[new_intent_id]["status"]})
             generated_intent_id = str(uuid4())
             _store_intent(generated_intent_id)
-            return httpx.Response(200, json={"intent_id": generated_intent_id})
+            return httpx.Response(200, json={"intent_id": generated_intent_id, "status": intents[generated_intent_id]["status"]})
         if request.url.path == "/v1/inbox":
             owner_agent = request.url.params.get("owner_agent")
             if owner_agent == "agent://conformance/owner":
