@@ -25,6 +25,11 @@ def test_run_contract_suite_happy_path() -> None:
     service_accounts: dict[str, dict[str, object]] = {}
     service_account_keys: dict[str, dict[str, object]] = {}
     intent_usage_by_scope: dict[tuple[str, str], int] = {}
+    principals: dict[str, dict[str, object]] = {}
+    aliases: dict[str, dict[str, object]] = {}
+    endpoint_routes: dict[str, dict[str, object]] = {}
+    transport_bindings: dict[str, dict[str, object]] = {}
+    deliveries: dict[str, dict[str, object]] = {}
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -1131,6 +1136,236 @@ def test_run_contract_suite_happy_path() -> None:
         if request.url.path == f"/v1/webhooks/events/{event_id}/replay" and request.method == "POST":
             assert request.url.params.get("owner_agent") == "agent://conformance/owner"
             return httpx.Response(200, json=webhook_replay_response)
+        if request.url.path == "/v1/principals" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = body.get("org_id")
+            workspace_id = body.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            workspace = workspaces.get(workspace_id)
+            if workspace is None or workspace.get("org_id") != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            principal_id = f"prn_{uuid4().hex[:24]}"
+            principal = {
+                "principal_id": principal_id,
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "principal_type": body.get("principal_type", "service_agent"),
+                "display_name": body.get("display_name"),
+                "status": "active",
+                "metadata": body.get("metadata", {}),
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+            }
+            principals[principal_id] = principal
+            return httpx.Response(200, json={"ok": True, "principal": principal})
+        if request.url.path.startswith("/v1/principals/") and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            principal_id = request.url.path.split("/v1/principals/")[1]
+            principal = principals.get(principal_id)
+            if principal is None:
+                return httpx.Response(404, json={"error": "principal_not_found"})
+            return httpx.Response(200, json={"ok": True, "principal": principal})
+        if request.url.path == "/v1/aliases" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            principal_id = body.get("principal_id")
+            principal = principals.get(principal_id or "")
+            if principal is None:
+                return httpx.Response(404, json={"error": "principal_not_found"})
+            alias_value = body.get("alias")
+            if not isinstance(alias_value, str):
+                return httpx.Response(422, json={"error": "invalid_alias"})
+            alias_id = f"pal_{uuid4().hex[:24]}"
+            alias_payload = {
+                "alias_id": alias_id,
+                "principal_id": principal_id,
+                "org_id": principal["org_id"],
+                "workspace_id": principal["workspace_id"],
+                "alias": alias_value,
+                "alias_type": body.get("alias_type", "service"),
+                "status": "active",
+                "metadata": body.get("metadata", {}),
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+                "revoked_at": None,
+            }
+            aliases[alias_id] = alias_payload
+            return httpx.Response(200, json={"ok": True, "alias": alias_payload})
+        if request.url.path.startswith("/v1/aliases/") and request.url.path.endswith("/revoke") and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            alias_id = request.url.path.split("/v1/aliases/")[1].split("/revoke")[0]
+            alias_payload = aliases.get(alias_id)
+            if alias_payload is None:
+                return httpx.Response(404, json={"error": "alias_not_found"})
+            alias_payload = dict(alias_payload)
+            alias_payload["status"] = "revoked"
+            alias_payload["revoked_at"] = "2026-02-28T00:00:05Z"
+            aliases[alias_id] = alias_payload
+            return httpx.Response(200, json={"ok": True, "alias": alias_payload})
+        if request.url.path == "/v1/routing/endpoints" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            principal_id = body.get("principal_id")
+            principal = principals.get(principal_id or "")
+            if principal is None:
+                return httpx.Response(404, json={"error": "principal_not_found"})
+            route_id = f"rte_{uuid4().hex[:24]}"
+            route_payload = {
+                "route_id": route_id,
+                "principal_id": principal_id,
+                "org_id": principal["org_id"],
+                "workspace_id": principal["workspace_id"],
+                "transport_type": body.get("transport_type", "http"),
+                "endpoint_url": body.get("endpoint_url"),
+                "auth_mode": body.get("auth_mode", "jwt"),
+                "region": body.get("region"),
+                "cluster_id": body.get("cluster_id"),
+                "failover_policy": body.get("failover_policy", "none"),
+                "priority": body.get("priority", 100),
+                "health_status": "healthy",
+                "status": "active",
+                "metadata": body.get("metadata", {}),
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+            }
+            endpoint_routes[route_id] = route_payload
+            return httpx.Response(200, json={"ok": True, "route": route_payload})
+        if request.url.path == "/v1/transports/bindings" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            principal_id = body.get("principal_id")
+            principal = principals.get(principal_id or "")
+            if principal is None:
+                return httpx.Response(404, json={"error": "principal_not_found"})
+            binding_id = f"tb_{uuid4().hex[:24]}"
+            binding_payload = {
+                "binding_id": binding_id,
+                "principal_id": principal_id,
+                "org_id": principal["org_id"],
+                "workspace_id": principal["workspace_id"],
+                "transport_type": body.get("transport_type", "http"),
+                "transport_handle": body.get("transport_handle"),
+                "priority": body.get("priority", 100),
+                "status": body.get("status", "active"),
+                "metadata": body.get("metadata", {}),
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+            }
+            transport_bindings[binding_id] = binding_payload
+            return httpx.Response(200, json={"ok": True, "binding": binding_payload})
+        if request.url.path == "/v1/routing/resolve" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = body.get("org_id")
+            workspace_id = body.get("workspace_id")
+            alias_value = body.get("alias")
+            principal_id = body.get("principal_id")
+            if isinstance(alias_value, str):
+                for alias_payload in aliases.values():
+                    if (
+                        alias_payload.get("status") == "active"
+                        and alias_payload.get("alias") == alias_value
+                        and alias_payload.get("org_id") == org_id
+                        and alias_payload.get("workspace_id") == workspace_id
+                    ):
+                        principal_id = alias_payload["principal_id"]
+                        break
+            principal = principals.get(principal_id or "")
+            if principal is None:
+                return httpx.Response(404, json={"error": "principal_not_found"})
+            routes = [
+                route
+                for route in endpoint_routes.values()
+                if route.get("principal_id") == principal["principal_id"] and route.get("status") == "active"
+            ]
+            if not routes:
+                return httpx.Response(404, json={"error": "route_not_found"})
+            routes.sort(key=lambda item: int(item.get("priority", 100)))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "resolution": {
+                        "alias": next((item for item in aliases.values() if item.get("alias") == alias_value), None),
+                        "principal": principal,
+                        "selected_route": routes[0],
+                        "candidate_routes": routes,
+                        "resolver_chain": ["alias", "principal_id", "endpoint_route", "transport_dispatch"],
+                    },
+                },
+            )
+        if request.url.path == "/v1/deliveries" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = body.get("org_id")
+            workspace_id = body.get("workspace_id")
+            idempotency_key = body.get("idempotency_key")
+            if isinstance(idempotency_key, str):
+                for item in deliveries.values():
+                    if (
+                        item.get("org_id") == org_id
+                        and item.get("workspace_id") == workspace_id
+                        and item.get("idempotency_key") == idempotency_key
+                    ):
+                        return httpx.Response(200, json={"ok": True, "delivery": item})
+            alias_value = body.get("alias")
+            principal_id = body.get("principal_id")
+            if isinstance(alias_value, str):
+                for alias_payload in aliases.values():
+                    if alias_payload.get("alias") == alias_value and alias_payload.get("status") == "active":
+                        principal_id = alias_payload["principal_id"]
+                        break
+            principal = principals.get(principal_id or "")
+            if principal is None:
+                return httpx.Response(404, json={"error": "principal_not_found"})
+            routes = [route for route in endpoint_routes.values() if route.get("principal_id") == principal["principal_id"]]
+            if not routes:
+                return httpx.Response(404, json={"error": "route_not_found"})
+            selected_route = sorted(routes, key=lambda item: int(item.get("priority", 100)))[0]
+            delivery_id = f"dlv_{uuid4().hex[:24]}"
+            delivery_payload = {
+                "delivery_id": delivery_id,
+                "replay_of_delivery_id": body.get("replay_of_delivery_id"),
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "principal_id": principal["principal_id"],
+                "alias": alias_value,
+                "transport_type": selected_route["transport_type"],
+                "route_id": selected_route["route_id"],
+                "status": "delivered",
+                "correlation_id": body.get("correlation_id"),
+                "idempotency_key": idempotency_key,
+                "payload": body.get("payload", {}),
+                "error_detail": None,
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+            }
+            deliveries[delivery_id] = delivery_payload
+            return httpx.Response(200, json={"ok": True, "delivery": delivery_payload})
+        if request.url.path.startswith("/v1/deliveries/") and request.url.path.endswith("/replay") and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            delivery_id = request.url.path.split("/v1/deliveries/")[1].split("/replay")[0]
+            original = deliveries.get(delivery_id)
+            if original is None:
+                return httpx.Response(404, json={"error": "delivery_not_found"})
+            replay_id = f"dlv_{uuid4().hex[:24]}"
+            replay_payload = dict(original)
+            replay_payload["delivery_id"] = replay_id
+            replay_payload["replay_of_delivery_id"] = delivery_id
+            replay_payload["idempotency_key"] = None
+            deliveries[replay_id] = replay_payload
+            return httpx.Response(200, json={"ok": True, "delivery": replay_payload})
         return httpx.Response(404, json={"error": "not_found"})
 
     results = run_contract_suite(
@@ -1138,7 +1373,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 40
+    assert len(results) == 41
     assert all(r.passed for r in results)
 
 
@@ -1155,7 +1390,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 40
+    assert len(results) == 41
     assert all(not result.passed for result in results)
 
 
