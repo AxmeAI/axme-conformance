@@ -18,6 +18,10 @@ def test_run_contract_suite_happy_path() -> None:
     schemas: dict[str, dict[str, object]] = {}
     users_by_owner: dict[str, dict[str, object]] = {}
     user_owner_by_normalized_nick: dict[str, str] = {}
+    organizations: dict[str, dict[str, object]] = {}
+    workspaces: dict[str, dict[str, object]] = {}
+    access_requests: dict[str, dict[str, object]] = {}
+    quota_policies: dict[tuple[str, str], dict[str, object]] = {}
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -120,6 +124,14 @@ def test_run_contract_suite_happy_path() -> None:
     def make_public_address(normalized_nick: str) -> str:
         return f"{normalized_nick}@ax"
 
+    def has_authorization(request: httpx.Request) -> bool:
+        authorization = request.headers.get("authorization")
+        return isinstance(authorization, str) and authorization.strip() != ""
+
+    def build_usage_window(limit: int) -> dict[str, int]:
+        used = min(5, limit)
+        return {"used": used, "limit": limit, "remaining": limit - used}
+
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal invite_counter, media_counter
         if request.url.path == "/health":
@@ -127,6 +139,224 @@ def test_run_contract_suite_happy_path() -> None:
             if trace_id is not None:
                 assert isinstance(trace_id, str) and len(trace_id) > 0
             return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/v1/organizations" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = str(uuid4())
+            organization = {
+                "org_id": org_id,
+                "name": body["name"],
+                "legal_name": body.get("legal_name"),
+                "primary_domain": body.get("primary_domain"),
+                "status": "active",
+                "metadata": body.get("metadata", {}),
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+                "workspaces_count": 0,
+                "members_count": 0,
+            }
+            organizations[org_id] = organization
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "organization": {
+                        "org_id": organization["org_id"],
+                        "name": organization["name"],
+                        "legal_name": organization["legal_name"],
+                        "primary_domain": organization["primary_domain"],
+                        "status": organization["status"],
+                        "metadata": organization["metadata"],
+                        "created_at": organization["created_at"],
+                        "updated_at": organization["updated_at"],
+                    },
+                },
+            )
+        if request.url.path.startswith("/v1/organizations/"):
+            parts = [part for part in request.url.path.split("/") if part]
+            if len(parts) >= 3 and parts[0] == "v1" and parts[1] == "organizations":
+                org_id_from_path = parts[2]
+                organization = organizations.get(org_id_from_path)
+                if organization is None:
+                    return httpx.Response(404, json={"error": "not_found"})
+                if len(parts) == 3 and request.method == "GET":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "ok": True,
+                            "organization": {
+                                "org_id": organization["org_id"],
+                                "name": organization["name"],
+                                "legal_name": organization["legal_name"],
+                                "primary_domain": organization["primary_domain"],
+                                "status": organization["status"],
+                                "metadata": organization["metadata"],
+                                "created_at": organization["created_at"],
+                                "updated_at": organization["updated_at"],
+                                "workspaces_count": organization["workspaces_count"],
+                                "members_count": organization["members_count"],
+                            },
+                        },
+                    )
+                if len(parts) == 4 and parts[3] == "workspaces" and request.method == "POST":
+                    if not has_authorization(request):
+                        return httpx.Response(401, json={"error": "unauthorized"})
+                    body = json.loads(request.content.decode("utf-8"))
+                    if body.get("org_id") != org_id_from_path:
+                        return httpx.Response(422, json={"error": "org mismatch"})
+                    workspace_id = str(uuid4())
+                    workspace = {
+                        "workspace_id": workspace_id,
+                        "org_id": org_id_from_path,
+                        "name": body["name"],
+                        "environment": body["environment"],
+                        "status": "active",
+                        "region": body.get("region"),
+                        "created_at": "2026-02-28T00:00:00Z",
+                        "updated_at": "2026-02-28T00:00:01Z",
+                    }
+                    workspaces[workspace_id] = workspace
+                    organization["workspaces_count"] = int(organization["workspaces_count"]) + 1
+                    organization["updated_at"] = "2026-02-28T00:00:01Z"
+                    return httpx.Response(200, json={"ok": True, "workspace": workspace})
+        if request.url.path == "/v1/access-requests" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            access_request_id = str(uuid4())
+            access_request = {
+                "access_request_id": access_request_id,
+                "request_type": body["request_type"],
+                "state": "pending",
+                "requester_actor_id": body["requester_actor_id"],
+                "org_id": body.get("org_id"),
+                "workspace_id": body.get("workspace_id"),
+                "requested_role": body.get("requested_role"),
+                "company_name": body.get("company_name"),
+                "justification": body.get("justification"),
+                "reviewer_actor_id": None,
+                "review_comment": None,
+                "reviewed_at": None,
+                "created_at": "2026-02-28T00:00:00Z",
+                "updated_at": "2026-02-28T00:00:00Z",
+            }
+            access_requests[access_request_id] = access_request
+            return httpx.Response(200, json={"ok": True, "access_request": access_request})
+        if request.url.path.startswith("/v1/access-requests/") and request.url.path.endswith("/review") and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            access_request_id = request.url.path.split("/v1/access-requests/")[1].split("/review")[0]
+            if access_request_id not in access_requests:
+                return httpx.Response(404, json={"error": "not_found"})
+            body = json.loads(request.content.decode("utf-8"))
+            review_state_by_decision = {
+                "approve": "approved",
+                "reject": "rejected",
+                "waitlist": "waitlisted",
+            }
+            state = review_state_by_decision.get(body.get("decision"))
+            if state is None:
+                return httpx.Response(422, json={"error": "invalid_decision"})
+            access_requests[access_request_id]["state"] = state
+            access_requests[access_request_id]["reviewer_actor_id"] = body["reviewer_actor_id"]
+            access_requests[access_request_id]["review_comment"] = body.get("review_comment")
+            access_requests[access_request_id]["reviewed_at"] = "2026-02-28T00:00:02Z"
+            access_requests[access_request_id]["updated_at"] = "2026-02-28T00:00:02Z"
+            return httpx.Response(200, json={"ok": True, "access_request": access_requests[access_request_id]})
+        if request.url.path == "/v1/quotas" and request.method == "PATCH":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = body["org_id"]
+            workspace_id = body["workspace_id"]
+            workspace = workspaces.get(workspace_id)
+            if workspace is None:
+                return httpx.Response(404, json={"error": "workspace not found"})
+            if workspace["org_id"] != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            key = (org_id, workspace_id)
+            quota_policy = quota_policies.get(key)
+            if quota_policy is None:
+                quota_policy = {
+                    "quota_policy_id": str(uuid4()),
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "dimensions": body["dimensions"],
+                    "soft_threshold_percent": body.get("soft_threshold_percent", 85),
+                    "hard_enforcement": body.get("hard_enforcement", False),
+                    "overage_mode": body["overage_mode"],
+                    "updated_by_actor_id": body.get("updated_by_actor_id"),
+                    "updated_at": "2026-02-28T00:00:03Z",
+                }
+                quota_policies[key] = quota_policy
+            else:
+                quota_policy.update(
+                    {
+                        "dimensions": body["dimensions"],
+                        "soft_threshold_percent": body.get("soft_threshold_percent", quota_policy["soft_threshold_percent"]),
+                        "hard_enforcement": body.get("hard_enforcement", quota_policy["hard_enforcement"]),
+                        "overage_mode": body["overage_mode"],
+                        "updated_by_actor_id": body.get("updated_by_actor_id"),
+                        "updated_at": "2026-02-28T00:00:03Z",
+                    }
+                )
+            return httpx.Response(200, json={"ok": True, "quota_policy": quota_policy})
+        if request.url.path == "/v1/quotas" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            workspace = workspaces.get(workspace_id)
+            if workspace is None:
+                return httpx.Response(404, json={"error": "workspace not found"})
+            if workspace["org_id"] != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            quota_policy = quota_policies.get((org_id, workspace_id))
+            if quota_policy is None:
+                return httpx.Response(404, json={"error": "quota not found"})
+            return httpx.Response(200, json={"ok": True, "quota_policy": quota_policy})
+        if request.url.path == "/v1/usage/summary" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            workspace = workspaces.get(workspace_id)
+            if workspace is None:
+                return httpx.Response(404, json={"error": "workspace not found"})
+            if workspace["org_id"] != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            quota_policy = quota_policies.get((org_id, workspace_id))
+            if quota_policy is None:
+                return httpx.Response(404, json={"error": "quota not found"})
+            dimensions = quota_policy["dimensions"]
+            assert isinstance(dimensions, dict)
+            usage_dimensions = {
+                "requests_per_minute": build_usage_window(int(dimensions["requests_per_minute"])),
+                "intents_per_day": build_usage_window(int(dimensions["intents_per_day"])),
+                "inbox_writes_per_day": build_usage_window(int(dimensions["inbox_writes_per_day"])),
+                "media_upload_bytes_per_day": build_usage_window(int(dimensions["media_upload_bytes_per_day"])),
+                "media_storage_bytes": build_usage_window(int(dimensions["media_storage_bytes"])),
+                "webhook_deliveries_per_day": build_usage_window(int(dimensions["webhook_deliveries_per_day"])),
+                "schema_writes_per_day": build_usage_window(int(dimensions["schema_writes_per_day"])),
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "summary": {
+                        "org_id": org_id,
+                        "workspace_id": workspace_id,
+                        "window_start": "2026-02-28T00:00:00Z",
+                        "window_end": "2026-02-28T00:59:59Z",
+                        "dimensions": usage_dimensions,
+                    },
+                },
+            )
         if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/events/stream") and request.method == "GET":
             intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/events/stream")[0]
             if intent_id_from_path not in intents:
@@ -760,7 +990,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 34
+    assert len(results) == 39
     assert all(r.passed for r in results)
 
 
@@ -777,7 +1007,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 34
+    assert len(results) == 39
     assert all(not result.passed for result in results)
 
 

@@ -21,6 +21,11 @@ Initial harness skeleton in progress.
 - Inbox changes pagination contract
 - Webhooks subscriptions contract
 - Webhooks events/replay contract
+- Enterprise organizations smoke contract
+- Enterprise workspaces smoke contract
+- Enterprise access requests smoke contract
+- Enterprise quotas and usage smoke contract
+- Enterprise tenant-boundary and permission error contract
 - Baseline suite execution and result model
 
 ## Development
