@@ -89,6 +89,7 @@ def run_contract_suite(
             _check_enterprise_workspaces_contract(client),
             _check_enterprise_access_requests_contract(client),
             _check_enterprise_quotas_usage_contract(client),
+            _check_enterprise_service_accounts_contract(client),
             _check_enterprise_tenant_boundary_and_permission_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
@@ -1427,7 +1428,141 @@ def _check_enterprise_quotas_usage_contract(client: httpx.Client) -> ContractRes
         return ContractResult("enterprise_quotas_usage", False, "invalid usage summary response shape")
     if summary.get("org_id") != org_id or summary.get("workspace_id") != workspace_id:
         return ContractResult("enterprise_quotas_usage", False, "usage summary tenant scope mismatch")
+    timeseries_response = client.get(
+        "/v1/usage/timeseries",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_days": 7},
+    )
+    if timeseries_response.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"usage timeseries status={timeseries_response.status_code}")
+    timeseries_data = timeseries_response.json()
+    series = timeseries_data.get("series")
+    if timeseries_data.get("ok") is not True or not _is_usage_series_shape(series):
+        return ContractResult("enterprise_quotas_usage", False, "invalid usage timeseries response shape")
+
+    strict_dimensions = dict(dimensions)
+    strict_dimensions["intents_per_day"] = 1
+    strict_patch = client.patch(
+        "/v1/quotas",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "dimensions": strict_dimensions,
+            "soft_threshold_percent": 80,
+            "hard_enforcement": True,
+            "overage_mode": "block",
+            "updated_by_actor_id": "actor://conformance/admin",
+        },
+    )
+    if strict_patch.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"strict quota patch status={strict_patch.status_code}")
+    first_intent = client.post(
+        "/v1/intents",
+        json={
+            "intent_type": "notify.message.v1",
+            "correlation_id": str(uuid4()),
+            "from_agent": "agent://conformance/sender",
+            "to_agent": "agent://conformance/receiver",
+            "payload": {
+                "text": "quota baseline",
+                "tenant": {"org_id": org_id, "workspace_id": workspace_id},
+            },
+        },
+    )
+    if first_intent.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"first strict quota intent status={first_intent.status_code}")
+    second_intent = client.post(
+        "/v1/intents",
+        json={
+            "intent_type": "notify.message.v1",
+            "correlation_id": str(uuid4()),
+            "from_agent": "agent://conformance/sender",
+            "to_agent": "agent://conformance/receiver",
+            "payload": {
+                "text": "quota exceed",
+                "tenant": {"org_id": org_id, "workspace_id": workspace_id},
+            },
+        },
+    )
+    if second_intent.status_code != 429:
+        return ContractResult(
+            "enterprise_quotas_usage",
+            False,
+            f"expected strict quota status=429 got={second_intent.status_code}",
+        )
     return ContractResult("enterprise_quotas_usage", True, "ok")
+
+
+def _check_enterprise_service_accounts_contract(client: httpx.Client) -> ContractResult:
+    org_id, error = _create_enterprise_organization_for_contract(client, name="Conformance Service Accounts Org")
+    if error:
+        return ContractResult("enterprise_service_accounts", False, error)
+    assert org_id is not None
+    workspace_id, workspace_error = _create_enterprise_workspace_for_contract(
+        client,
+        org_id=org_id,
+        name="Conformance Service Accounts Workspace",
+    )
+    if workspace_error:
+        return ContractResult("enterprise_service_accounts", False, workspace_error)
+    assert workspace_id is not None
+
+    create_response = client.post(
+        "/v1/service-accounts",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "name": "conformance-runner",
+            "description": "conformance managed service account",
+            "created_by_actor_id": "actor://conformance/admin",
+        },
+    )
+    if create_response.status_code != 200:
+        return ContractResult("enterprise_service_accounts", False, f"service-account create status={create_response.status_code}")
+    create_data = create_response.json()
+    service_account = create_data.get("service_account")
+    if create_data.get("ok") is not True or not _is_service_account_shape(service_account):
+        return ContractResult("enterprise_service_accounts", False, "invalid service-account create response shape")
+    service_account_id = service_account.get("service_account_id")
+    assert isinstance(service_account_id, str)
+
+    list_response = client.get(
+        "/v1/service-accounts",
+        params={"org_id": org_id, "workspace_id": workspace_id},
+    )
+    if list_response.status_code != 200:
+        return ContractResult("enterprise_service_accounts", False, f"service-account list status={list_response.status_code}")
+    list_data = list_response.json()
+    service_accounts = list_data.get("service_accounts")
+    if list_data.get("ok") is not True or not isinstance(service_accounts, list):
+        return ContractResult("enterprise_service_accounts", False, "invalid service-account list response shape")
+    if not any(isinstance(item, dict) and item.get("service_account_id") == service_account_id for item in service_accounts):
+        return ContractResult("enterprise_service_accounts", False, "service-account list missing created account")
+
+    key_create_response = client.post(
+        f"/v1/service-accounts/{service_account_id}/keys",
+        json={"created_by_actor_id": "actor://conformance/admin"},
+    )
+    if key_create_response.status_code != 200:
+        return ContractResult("enterprise_service_accounts", False, f"service-account key create status={key_create_response.status_code}")
+    key_create_data = key_create_response.json()
+    created_key = key_create_data.get("key")
+    if key_create_data.get("ok") is not True or not _is_service_account_key_shape(created_key):
+        return ContractResult("enterprise_service_accounts", False, "invalid service-account key create response shape")
+    key_id = created_key.get("key_id")
+    assert isinstance(key_id, str)
+
+    revoke_response = client.post(
+        f"/v1/service-accounts/{service_account_id}/keys/{key_id}/revoke",
+    )
+    if revoke_response.status_code != 200:
+        return ContractResult("enterprise_service_accounts", False, f"service-account key revoke status={revoke_response.status_code}")
+    revoke_data = revoke_response.json()
+    revoked_key = revoke_data.get("key")
+    if revoke_data.get("ok") is not True or not isinstance(revoked_key, dict):
+        return ContractResult("enterprise_service_accounts", False, "invalid service-account key revoke response shape")
+    if revoked_key.get("status") != "revoked":
+        return ContractResult("enterprise_service_accounts", False, "service-account key revoke did not set status=revoked")
+    return ContractResult("enterprise_service_accounts", True, "ok")
 
 
 def _check_enterprise_tenant_boundary_and_permission_contract(client: httpx.Client) -> ContractResult:
@@ -1704,6 +1839,72 @@ def _is_usage_dimension_window(value: object) -> bool:
     if not isinstance(value.get("limit"), int) or value["limit"] < 0:
         return False
     return isinstance(value.get("remaining"), int)
+
+
+def _is_usage_series_shape(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if not _is_uuid(value.get("org_id")):
+        return False
+    if not _is_uuid(value.get("workspace_id")):
+        return False
+    if value.get("granularity") not in {"hour", "day"}:
+        return False
+    points = value.get("points")
+    if not isinstance(points, list):
+        return False
+    for point in points:
+        if not isinstance(point, dict):
+            return False
+        if not isinstance(point.get("at"), str):
+            return False
+        dimensions = point.get("dimensions")
+        if not isinstance(dimensions, dict):
+            return False
+        for key in QUOTA_DIMENSION_KEYS:
+            quantity = dimensions.get(key)
+            if not isinstance(quantity, int) or quantity < 0:
+                return False
+    return True
+
+
+def _is_service_account_shape(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_keys = {
+        "service_account_id",
+        "org_id",
+        "workspace_id",
+        "name",
+        "status",
+        "created_by_actor_id",
+        "created_at",
+        "updated_at",
+    }
+    if not required_keys.issubset(value.keys()):
+        return False
+    if not isinstance(value.get("service_account_id"), str):
+        return False
+    if not _is_uuid(value.get("org_id")):
+        return False
+    if not _is_uuid(value.get("workspace_id")):
+        return False
+    return isinstance(value.get("name"), str) and isinstance(value.get("status"), str)
+
+
+def _is_service_account_key_shape(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_keys = {"key_id", "service_account_id", "key_hint", "status", "created_at", "token"}
+    if not required_keys.issubset(value.keys()):
+        return False
+    return (
+        isinstance(value.get("key_id"), str)
+        and isinstance(value.get("service_account_id"), str)
+        and isinstance(value.get("key_hint"), str)
+        and isinstance(value.get("token"), str)
+        and value.get("status") == "active"
+    )
 
 
 def _is_thread_shape(value: object) -> bool:
