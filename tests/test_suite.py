@@ -760,7 +760,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 33
+    assert len(results) == 34
     assert all(r.passed for r in results)
 
 
@@ -777,7 +777,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 33
+    assert len(results) == 34
     assert all(not result.passed for result in results)
 
 

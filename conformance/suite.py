@@ -50,6 +50,7 @@ def run_contract_suite(
             _check_intents_get_contract(client),
             _check_intents_events_contract(client),
             _check_intents_stream_resume_contract(client),
+            _check_intents_continuation_autonomy_contract(client),
             _check_intents_resolve_contract(client),
             _check_intent_completion_delivery_contract(client),
             _check_inbox_list_contract(client),
@@ -372,6 +373,94 @@ def _check_intents_stream_resume_contract(client: httpx.Client) -> ContractResul
         return ContractResult("intents_stream_resume", False, "stream did not yield resumed events")
 
     return ContractResult("intents_stream_resume", True, "ok")
+
+
+def _check_intents_continuation_autonomy_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_continuation_autonomy", False, f"create status={create_response.status_code}")
+    intent_id = create_response.json().get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_continuation_autonomy", False, "invalid intent_id from create response")
+
+    baseline_events = client.get(f"/v1/intents/{intent_id}/events")
+    if baseline_events.status_code != 200:
+        return ContractResult("intents_continuation_autonomy", False, f"baseline events status={baseline_events.status_code}")
+    baseline_payload = baseline_events.json().get("events")
+    if not isinstance(baseline_payload, list) or not baseline_payload:
+        return ContractResult("intents_continuation_autonomy", False, "missing baseline events")
+    seq_values = [item.get("seq") for item in baseline_payload if isinstance(item, dict)]
+    if not seq_values or not all(isinstance(seq, int) for seq in seq_values):
+        return ContractResult("intents_continuation_autonomy", False, "invalid baseline seq values")
+    since_seq = max(seq_values)
+
+    resolve_response = client.post(
+        f"/v1/intents/{intent_id}/resolve",
+        json={"status": "COMPLETED", "result": {"ok": True}},
+    )
+    if resolve_response.status_code != 200:
+        return ContractResult("intents_continuation_autonomy", False, f"resolve status={resolve_response.status_code}")
+
+    polling_response = client.get(
+        f"/v1/intents/{intent_id}/events",
+        params={"since": since_seq},
+    )
+    if polling_response.status_code != 200:
+        return ContractResult("intents_continuation_autonomy", False, f"polling status={polling_response.status_code}")
+    polling_events = polling_response.json().get("events")
+    if not isinstance(polling_events, list):
+        return ContractResult("intents_continuation_autonomy", False, "invalid polling events payload")
+    if not any(
+        isinstance(item, dict)
+        and item.get("event_type") == "intent.completed"
+        and item.get("status") == "COMPLETED"
+        for item in polling_events
+    ):
+        return ContractResult(
+            "intents_continuation_autonomy",
+            False,
+            "polling did not expose terminal transition without get_intent side effects",
+        )
+
+    stream_response = client.get(
+        f"/v1/intents/{intent_id}/events/stream",
+        params={"since": since_seq, "wait_seconds": 2},
+    )
+    if stream_response.status_code != 200:
+        return ContractResult("intents_continuation_autonomy", False, f"stream status={stream_response.status_code}")
+
+    event_name: str | None = None
+    data_lines: list[str] = []
+    saw_terminal = False
+    for line in stream_response.text.splitlines():
+        if line == "":
+            if event_name == "intent.completed" and data_lines:
+                try:
+                    payload = json.loads("\n".join(data_lines))
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict) and payload.get("status") == "COMPLETED":
+                    saw_terminal = True
+                    break
+            event_name = None
+            data_lines = []
+            continue
+        if line.startswith("event:"):
+            event_name = line.partition(":")[2].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.partition(":")[2].lstrip())
+            continue
+
+    if not saw_terminal:
+        return ContractResult(
+            "intents_continuation_autonomy",
+            False,
+            "stream did not expose terminal transition without get_intent side effects",
+        )
+
+    return ContractResult("intents_continuation_autonomy", True, "ok")
 
 
 def _check_intents_resolve_contract(client: httpx.Client) -> ContractResult:
