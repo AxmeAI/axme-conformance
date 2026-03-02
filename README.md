@@ -13,6 +13,7 @@ Initial harness skeleton in progress.
 - Intent create idempotency/correlation contract
 - Intent events list contract (`since` cursor semantics)
 - Intent stream resume contract (`/events/stream`)
+- Intent continuation autonomy contract (poll + stream terminal visibility without `get_intent` side effects)
 - Intent resolve + terminal immutability contract
 - Intent completion delivery contract (`reply_to` inbox visibility)
 - Inbox list contract
