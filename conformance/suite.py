@@ -1490,6 +1490,78 @@ def _check_enterprise_quotas_usage_contract(client: httpx.Client) -> ContractRes
             False,
             f"expected strict quota status=429 got={second_intent.status_code}",
         )
+
+    for non_block_mode in ("grace", "bill_overage"):
+        non_block_workspace_id, non_block_workspace_error = _create_enterprise_workspace_for_contract(
+            client,
+            org_id=org_id,
+            name=f"Conformance Quotas Workspace {non_block_mode}",
+        )
+        if non_block_workspace_error:
+            return ContractResult("enterprise_quotas_usage", False, non_block_workspace_error)
+        assert non_block_workspace_id is not None
+
+        non_block_dimensions = dict(dimensions)
+        non_block_dimensions["intents_per_day"] = 1
+        non_block_patch = client.patch(
+            "/v1/quotas",
+            json={
+                "org_id": org_id,
+                "workspace_id": non_block_workspace_id,
+                "dimensions": non_block_dimensions,
+                "soft_threshold_percent": 80,
+                "hard_enforcement": True,
+                "overage_mode": non_block_mode,
+                "updated_by_actor_id": "actor://conformance/admin",
+            },
+        )
+        if non_block_patch.status_code != 200:
+            return ContractResult(
+                "enterprise_quotas_usage",
+                False,
+                f"non-block quota patch mode={non_block_mode} status={non_block_patch.status_code}",
+            )
+
+        first_non_block = client.post(
+            "/v1/intents",
+            json={
+                "intent_type": "notify.message.v1",
+                "correlation_id": str(uuid4()),
+                "from_agent": "agent://conformance/sender",
+                "to_agent": "agent://conformance/receiver",
+                "payload": {
+                    "text": f"quota non-block baseline {non_block_mode}",
+                    "tenant": {"org_id": org_id, "workspace_id": non_block_workspace_id},
+                },
+            },
+        )
+        if first_non_block.status_code != 200:
+            return ContractResult(
+                "enterprise_quotas_usage",
+                False,
+                f"non-block first intent mode={non_block_mode} status={first_non_block.status_code}",
+            )
+
+        second_non_block = client.post(
+            "/v1/intents",
+            json={
+                "intent_type": "notify.message.v1",
+                "correlation_id": str(uuid4()),
+                "from_agent": "agent://conformance/sender",
+                "to_agent": "agent://conformance/receiver",
+                "payload": {
+                    "text": f"quota non-block exceed {non_block_mode}",
+                    "tenant": {"org_id": org_id, "workspace_id": non_block_workspace_id},
+                },
+            },
+        )
+        if second_non_block.status_code != 200:
+            return ContractResult(
+                "enterprise_quotas_usage",
+                False,
+                f"expected non-block mode={non_block_mode} status=200 got={second_non_block.status_code}",
+            )
+
     return ContractResult("enterprise_quotas_usage", True, "ok")
 
 
