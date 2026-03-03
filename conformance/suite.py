@@ -88,6 +88,7 @@ def run_contract_suite(
             _check_enterprise_organizations_contract(client),
             _check_enterprise_workspaces_contract(client),
             _check_enterprise_access_requests_contract(client),
+            _check_enterprise_portal_backend_contract(client),
             _check_enterprise_quotas_usage_contract(client),
             _check_enterprise_service_accounts_contract(client),
             _check_enterprise_naming_routing_delivery_contract(client),
@@ -1454,6 +1455,110 @@ def _check_enterprise_access_requests_contract(client: httpx.Client) -> Contract
             f"expected expired review status=409 got={expired_review_response.status_code}",
         )
     return ContractResult("enterprise_access_requests", True, "ok")
+
+
+def _check_enterprise_portal_backend_contract(client: httpx.Client) -> ContractResult:
+    org_id, error = _create_enterprise_organization_for_contract(client, name="Conformance Portal Org")
+    if error:
+        return ContractResult("enterprise_portal_backend", False, error)
+    assert org_id is not None
+    workspace_id, workspace_error = _create_enterprise_workspace_for_contract(
+        client,
+        org_id=org_id,
+        name="Conformance Portal Workspace",
+    )
+    if workspace_error:
+        return ContractResult("enterprise_portal_backend", False, workspace_error)
+    assert workspace_id is not None
+
+    access_request_create = client.post(
+        "/v1/access-requests",
+        json={
+            "request_type": "elevated_role",
+            "requester_actor_id": "actor://conformance/portal-requester",
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "requested_role": "workspace_admin",
+            "justification": "portal queue validation",
+        },
+    )
+    if access_request_create.status_code != 200:
+        return ContractResult("enterprise_portal_backend", False, f"access request create status={access_request_create.status_code}")
+    access_request = access_request_create.json().get("access_request")
+    if not isinstance(access_request, dict):
+        return ContractResult("enterprise_portal_backend", False, "invalid access request create response shape")
+    access_request_id = access_request.get("access_request_id")
+    if not _is_uuid(access_request_id):
+        return ContractResult("enterprise_portal_backend", False, "invalid access_request_id")
+
+    navigation_response = client.get(
+        "/v1/portal/enterprise/navigation",
+        params={"org_id": org_id, "workspace_id": workspace_id},
+    )
+    if navigation_response.status_code != 200:
+        return ContractResult("enterprise_portal_backend", False, f"portal navigation status={navigation_response.status_code}")
+    navigation = navigation_response.json().get("navigation")
+    if not isinstance(navigation, dict):
+        return ContractResult("enterprise_portal_backend", False, "invalid portal navigation response shape")
+    role_gating = navigation.get("role_gating")
+    sections = navigation.get("sections")
+    if not isinstance(role_gating, dict) or not isinstance(sections, list):
+        return ContractResult("enterprise_portal_backend", False, "portal navigation missing role_gating/sections")
+    if "can_view_personal_cabinet" not in role_gating or "can_review_access_requests" not in role_gating:
+        return ContractResult("enterprise_portal_backend", False, "portal role_gating missing expected keys")
+
+    queue_response = client.get(
+        "/v1/portal/enterprise/request-queue",
+        params={"org_id": org_id, "workspace_id": workspace_id, "limit": 20},
+    )
+    if queue_response.status_code != 200:
+        return ContractResult("enterprise_portal_backend", False, f"portal request queue status={queue_response.status_code}")
+    queue = queue_response.json().get("queue")
+    if not isinstance(queue, dict):
+        return ContractResult("enterprise_portal_backend", False, "invalid portal request queue response shape")
+    queue_counts = queue.get("counts")
+    queue_items = queue.get("items")
+    if not isinstance(queue_counts, dict) or not isinstance(queue_items, list):
+        return ContractResult("enterprise_portal_backend", False, "portal request queue missing counts/items")
+    if int(queue_counts.get("pending", 0)) < 1:
+        return ContractResult("enterprise_portal_backend", False, "portal request queue pending count is empty")
+    if not any(isinstance(item, dict) and item.get("access_request_id") == access_request_id for item in queue_items):
+        return ContractResult("enterprise_portal_backend", False, "portal request queue missing created access request")
+
+    enterprise_overview_response = client.get(
+        "/v1/portal/enterprise/overview",
+        params={"org_id": org_id, "workspace_id": workspace_id},
+    )
+    if enterprise_overview_response.status_code != 200:
+        return ContractResult("enterprise_portal_backend", False, f"portal enterprise overview status={enterprise_overview_response.status_code}")
+    enterprise_overview = enterprise_overview_response.json().get("overview")
+    if not isinstance(enterprise_overview, dict):
+        return ContractResult("enterprise_portal_backend", False, "invalid portal enterprise overview response shape")
+    if not isinstance(enterprise_overview.get("metrics"), dict):
+        return ContractResult("enterprise_portal_backend", False, "portal enterprise overview missing metrics")
+    if "delivery_operations" not in enterprise_overview:
+        return ContractResult("enterprise_portal_backend", False, "portal enterprise overview missing delivery_operations")
+
+    personal_overview_response = client.get(
+        "/v1/portal/personal/overview",
+        params={"org_id": org_id, "workspace_id": workspace_id},
+    )
+    if personal_overview_response.status_code != 200:
+        return ContractResult("enterprise_portal_backend", False, f"portal personal overview status={personal_overview_response.status_code}")
+    personal_overview = personal_overview_response.json().get("overview")
+    if not isinstance(personal_overview, dict):
+        return ContractResult("enterprise_portal_backend", False, "invalid portal personal overview response shape")
+    if not isinstance(personal_overview.get("my_metrics"), dict):
+        return ContractResult("enterprise_portal_backend", False, "portal personal overview missing my_metrics")
+    if not isinstance(personal_overview.get("my_access_requests"), list):
+        return ContractResult("enterprise_portal_backend", False, "portal personal overview missing my_access_requests list")
+    available_actions = personal_overview.get("available_actions")
+    if not isinstance(available_actions, dict):
+        return ContractResult("enterprise_portal_backend", False, "portal personal overview missing available_actions")
+    if available_actions.get("submit_access_request") is not True:
+        return ContractResult("enterprise_portal_backend", False, "portal personal overview submit_access_request should be true")
+
+    return ContractResult("enterprise_portal_backend", True, "ok")
 
 
 def _check_enterprise_quotas_usage_contract(client: httpx.Client) -> ContractResult:
