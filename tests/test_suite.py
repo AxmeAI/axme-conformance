@@ -1280,12 +1280,36 @@ def test_run_contract_suite_happy_path() -> None:
                 "cluster_id": body.get("cluster_id"),
                 "failover_policy": body.get("failover_policy", "none"),
                 "priority": body.get("priority", 100),
-                "health_status": "healthy",
+                "health_status": body.get("health_status", "unknown"),
                 "status": "active",
                 "metadata": body.get("metadata", {}),
                 "created_at": "2026-02-28T00:00:00Z",
                 "updated_at": "2026-02-28T00:00:00Z",
             }
+            endpoint_routes[route_id] = route_payload
+            return httpx.Response(200, json={"ok": True, "route": route_payload})
+        if request.url.path.startswith("/v1/routing/endpoints/") and request.method == "PATCH":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            route_id = request.url.path.split("/v1/routing/endpoints/")[1]
+            route_payload = endpoint_routes.get(route_id)
+            if route_payload is None:
+                return httpx.Response(404, json={"error": "route_not_found"})
+            body = json.loads(request.content.decode("utf-8"))
+            route_payload = dict(route_payload)
+            for field in (
+                "endpoint_url",
+                "auth_mode",
+                "region",
+                "cluster_id",
+                "failover_policy",
+                "priority",
+                "health_status",
+                "status",
+            ):
+                if field in body and body.get(field) is not None:
+                    route_payload[field] = body[field]
+            route_payload["updated_at"] = "2026-02-28T00:00:05Z"
             endpoint_routes[route_id] = route_payload
             return httpx.Response(200, json={"ok": True, "route": route_payload})
         if request.url.path == "/v1/transports/bindings" and request.method == "POST":
@@ -1341,6 +1365,28 @@ def test_run_contract_suite_happy_path() -> None:
             if not routes:
                 return httpx.Response(404, json={"error": "route_not_found"})
             routes.sort(key=lambda item: int(item.get("priority", 100)))
+            primary_route = routes[0]
+            selected_route = primary_route
+            fallback_applied = False
+            fallback_from_route_id = None
+            fallback_reason = None
+            primary_health = str(primary_route.get("health_status") or "unknown")
+            primary_policy = str(primary_route.get("failover_policy") or "none")
+            if primary_health not in {"healthy", "degraded"}:
+                if primary_policy in {"same_region", "cross_region"}:
+                    for candidate in routes[1:]:
+                        candidate_health = str(candidate.get("health_status") or "unknown")
+                        if candidate_health not in {"healthy", "degraded"}:
+                            continue
+                        if primary_policy == "same_region" and candidate.get("region") != primary_route.get("region"):
+                            continue
+                        selected_route = candidate
+                        fallback_applied = True
+                        fallback_from_route_id = primary_route.get("route_id")
+                        fallback_reason = "primary_route_not_healthy"
+                        break
+                if not fallback_applied:
+                    fallback_reason = "no_healthy_fallback_route"
             return httpx.Response(
                 200,
                 json={
@@ -1348,8 +1394,12 @@ def test_run_contract_suite_happy_path() -> None:
                     "resolution": {
                         "alias": next((item for item in aliases.values() if item.get("alias") == alias_value), None),
                         "principal": principal,
-                        "selected_route": routes[0],
+                        "primary_route": primary_route,
+                        "selected_route": selected_route,
                         "candidate_routes": routes,
+                        "fallback_applied": fallback_applied,
+                        "fallback_from_route_id": fallback_from_route_id,
+                        "fallback_reason": fallback_reason,
                         "resolver_chain": ["alias", "principal_id", "endpoint_route", "transport_dispatch"],
                     },
                 },
@@ -1382,7 +1432,23 @@ def test_run_contract_suite_happy_path() -> None:
             routes = [route for route in endpoint_routes.values() if route.get("principal_id") == principal["principal_id"]]
             if not routes:
                 return httpx.Response(404, json={"error": "route_not_found"})
-            selected_route = sorted(routes, key=lambda item: int(item.get("priority", 100)))[0]
+            active_routes = [route for route in routes if route.get("status") == "active"]
+            if not active_routes:
+                return httpx.Response(404, json={"error": "route_not_found"})
+            active_routes.sort(key=lambda item: int(item.get("priority", 100)))
+            primary_route = active_routes[0]
+            selected_route = primary_route
+            primary_health = str(primary_route.get("health_status") or "unknown")
+            primary_policy = str(primary_route.get("failover_policy") or "none")
+            if primary_health not in {"healthy", "degraded"} and primary_policy in {"same_region", "cross_region"}:
+                for candidate in active_routes[1:]:
+                    candidate_health = str(candidate.get("health_status") or "unknown")
+                    if candidate_health not in {"healthy", "degraded"}:
+                        continue
+                    if primary_policy == "same_region" and candidate.get("region") != primary_route.get("region"):
+                        continue
+                    selected_route = candidate
+                    break
             delivery_id = f"dlv_{uuid4().hex[:24]}"
             delivery_payload = {
                 "delivery_id": delivery_id,
@@ -1393,7 +1459,7 @@ def test_run_contract_suite_happy_path() -> None:
                 "alias": alias_value,
                 "transport_type": selected_route["transport_type"],
                 "route_id": selected_route["route_id"],
-                "status": "delivered",
+                "status": "pending" if str(selected_route.get("health_status") or "unknown") in {"degraded", "unhealthy"} else "delivered",
                 "correlation_id": body.get("correlation_id"),
                 "idempotency_key": idempotency_key,
                 "payload": body.get("payload", {}),
@@ -1403,6 +1469,120 @@ def test_run_contract_suite_happy_path() -> None:
             }
             deliveries[delivery_id] = delivery_payload
             return httpx.Response(200, json={"ok": True, "delivery": delivery_payload})
+        if request.url.path == "/v1/deliveries-operations" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            window_hours = request.url.params.get("window_hours")
+            filtered = [
+                item
+                for item in deliveries.values()
+                if (org_id is None or item.get("org_id") == org_id)
+                and (workspace_id is None or item.get("workspace_id") == workspace_id)
+            ]
+            status_counts = {"submitted": 0, "delivered": 0, "failed": 0, "pending": 0, "dead_lettered": 0}
+            by_transport: dict[str, dict[str, object]] = {}
+            by_route: dict[str, dict[str, object]] = {}
+            replay_count = 0
+            for item in filtered:
+                status = str(item.get("status") or "submitted")
+                transport_type = str(item.get("transport_type") or "unknown")
+                route_id = str(item.get("route_id") or "unknown")
+                if status in status_counts:
+                    status_counts[status] = int(status_counts[status]) + 1
+                if item.get("replay_of_delivery_id") is not None:
+                    replay_count += 1
+                if transport_type not in by_transport:
+                    by_transport[transport_type] = {
+                        "transport_type": transport_type,
+                        "total": 0,
+                        "status_counts": {"submitted": 0, "delivered": 0, "failed": 0, "pending": 0, "dead_lettered": 0},
+                        "error_rate": 0.0,
+                    }
+                transport_bucket = by_transport[transport_type]
+                transport_bucket["total"] = int(transport_bucket["total"]) + 1
+                transport_bucket["status_counts"][status] = int(transport_bucket["status_counts"].get(status, 0)) + 1
+                if route_id not in by_route:
+                    by_route[route_id] = {
+                        "route_id": route_id,
+                        "total": 0,
+                        "status_counts": {"submitted": 0, "delivered": 0, "failed": 0, "pending": 0, "dead_lettered": 0},
+                    }
+                route_bucket = by_route[route_id]
+                route_bucket["total"] = int(route_bucket["total"]) + 1
+                route_bucket["status_counts"][status] = int(route_bucket["status_counts"].get(status, 0)) + 1
+            for bucket in by_transport.values():
+                total = int(bucket["total"])
+                errors = int(bucket["status_counts"]["failed"]) + int(bucket["status_counts"]["dead_lettered"])
+                bucket["error_rate"] = float(errors / total) if total > 0 else 0.0
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "operations": {
+                        "org_id": org_id,
+                        "workspace_id": workspace_id,
+                        "window_hours": int(window_hours or 24),
+                        "window_start": "2026-02-27T00:00:00Z",
+                        "window_end": "2026-02-28T00:00:00Z",
+                        "total_deliveries": len(filtered),
+                        "replay_count": replay_count,
+                        "status_counts": status_counts,
+                        "by_transport": list(by_transport.values()),
+                        "by_route": list(by_route.values()),
+                    },
+                },
+            )
+        if request.url.path == "/v1/deliveries/reconcile" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content.decode("utf-8"))
+            org_id = body.get("org_id")
+            workspace_id = body.get("workspace_id")
+            reconciled_ids: list[str] = []
+            by_transport: dict[str, int] = {}
+            by_route: dict[str, int] = {}
+            for delivery_id, item in list(deliveries.items()):
+                if item.get("status") != "pending":
+                    continue
+                if org_id is not None and item.get("org_id") != org_id:
+                    continue
+                if workspace_id is not None and item.get("workspace_id") != workspace_id:
+                    continue
+                next_item = dict(item)
+                next_item["status"] = "dead_lettered"
+                next_item["error_detail"] = "reconciled pending delivery after timeout"
+                next_item["updated_at"] = "2026-02-28T00:00:10Z"
+                deliveries[delivery_id] = next_item
+                reconciled_ids.append(delivery_id)
+                transport_type = str(next_item.get("transport_type") or "unknown")
+                route_id = str(next_item.get("route_id") or "unknown")
+                by_transport[transport_type] = int(by_transport.get(transport_type, 0)) + 1
+                by_route[route_id] = int(by_route.get(route_id, 0)) + 1
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "reconciliation": {
+                        "org_id": org_id,
+                        "workspace_id": workspace_id,
+                        "max_pending_age_seconds": int(body.get("max_pending_age_seconds", 300)),
+                        "limit": int(body.get("limit", 500)),
+                        "reconciled_count": len(reconciled_ids),
+                        "reconciled_delivery_ids": reconciled_ids,
+                        "by_transport": [
+                            {"transport_type": key, "count": by_transport[key]}
+                            for key in sorted(by_transport.keys())
+                        ],
+                        "by_route": [
+                            {"route_id": key, "count": by_route[key]}
+                            for key in sorted(by_route.keys())
+                        ],
+                        "reconciled_at": "2026-02-28T00:00:10Z",
+                    },
+                },
+            )
         if request.url.path.startswith("/v1/deliveries/") and request.url.path.endswith("/replay") and request.method == "POST":
             if not has_authorization(request):
                 return httpx.Response(401, json={"error": "unauthorized"})
