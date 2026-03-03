@@ -298,6 +298,254 @@ def test_run_contract_suite_happy_path() -> None:
             access_requests[access_request_id]["reviewed_at"] = "2026-02-28T00:00:02Z"
             access_requests[access_request_id]["updated_at"] = "2026-02-28T00:00:02Z"
             return httpx.Response(200, json={"ok": True, "access_request": access_requests[access_request_id]})
+        if request.url.path == "/v1/portal/enterprise/navigation" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            navigation = {
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "actor_id": "actor://conformance/admin",
+                "roles": ["org_admin"],
+                "role_gating": {
+                    "can_view_personal_cabinet": True,
+                    "can_view_enterprise_overview": True,
+                    "can_view_request_queue": True,
+                    "can_review_access_requests": True,
+                    "can_manage_members": True,
+                    "can_manage_service_accounts": True,
+                    "can_manage_quotas": True,
+                    "can_view_usage_limits": True,
+                },
+                "sections": [
+                    {
+                        "section_id": "personal_cabinet",
+                        "title": "Personal Cabinet",
+                        "visible": True,
+                        "actions": [
+                            {"action_id": "view_personal_overview", "allowed": True},
+                            {"action_id": "submit_access_request", "allowed": True},
+                        ],
+                    },
+                    {
+                        "section_id": "enterprise_overview",
+                        "title": "Enterprise Overview",
+                        "visible": True,
+                        "actions": [
+                            {"action_id": "view_usage_limits", "allowed": True},
+                            {"action_id": "manage_service_accounts", "allowed": True},
+                            {"action_id": "manage_members", "allowed": True},
+                        ],
+                    },
+                    {
+                        "section_id": "request_queue",
+                        "title": "Request Queue",
+                        "visible": True,
+                        "actions": [
+                            {"action_id": "view_requests", "allowed": True},
+                            {"action_id": "review_requests", "allowed": True},
+                        ],
+                    },
+                ],
+            }
+            return httpx.Response(200, json={"ok": True, "navigation": navigation})
+        if request.url.path == "/v1/portal/enterprise/request-queue" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            state_filter = request.url.params.get("state")
+            limit = int(request.url.params.get("limit") or 200)
+            rows: list[dict[str, object]] = []
+            for item in access_requests.values():
+                if isinstance(org_id, str) and item.get("org_id") != org_id:
+                    continue
+                if isinstance(workspace_id, str) and item.get("workspace_id") != workspace_id:
+                    continue
+                rows.append(item)
+            counts = {"pending": 0, "under_review": 0, "approved": 0, "rejected": 0, "waitlisted": 0, "expired": 0}
+            for item in rows:
+                item_state = str(item.get("state") or "")
+                if item_state in counts:
+                    counts[item_state] = int(counts[item_state]) + 1
+            items = rows
+            if isinstance(state_filter, str):
+                items = [item for item in rows if item.get("state") == state_filter]
+            queue_payload = {
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "state_filter": state_filter,
+                "counts": counts,
+                "limit": limit,
+                "items": items[:limit],
+            }
+            return httpx.Response(200, json={"ok": True, "queue": queue_payload})
+        if request.url.path == "/v1/portal/enterprise/overview" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            organization = organizations.get(org_id)
+            workspace = workspaces.get(workspace_id)
+            if organization is None or workspace is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            pending_access_requests = [
+                item
+                for item in access_requests.values()
+                if item.get("org_id") == org_id and item.get("workspace_id") == workspace_id and item.get("state") == "pending"
+            ]
+            service_accounts_for_workspace = [
+                item
+                for item in service_accounts.values()
+                if item.get("org_id") == org_id and item.get("workspace_id") == workspace_id
+            ]
+            delivery_rows = [
+                item
+                for item in deliveries.values()
+                if item.get("org_id") == org_id and item.get("workspace_id") == workspace_id
+            ]
+            delivery_counts = {"submitted": 0, "delivered": 0, "failed": 0, "pending": 0, "dead_lettered": 0}
+            for item in delivery_rows:
+                item_status = str(item.get("status") or "")
+                if item_status in delivery_counts:
+                    delivery_counts[item_status] = int(delivery_counts[item_status]) + 1
+            overview = {
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "organization": {
+                    "org_id": organization["org_id"],
+                    "name": organization["name"],
+                    "status": organization["status"],
+                },
+                "workspace": workspace,
+                "metrics": {
+                    "members_count": 1,
+                    "service_accounts_count": len(service_accounts_for_workspace),
+                    "pending_access_requests_count": len(pending_access_requests),
+                },
+                "quota_policy": quota_policies.get((org_id, workspace_id)),
+                "usage_summary": {
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "window": "day",
+                    "dimensions": {
+                        "intents_per_day": build_usage_window(1000),
+                    },
+                    "generated_at": "2026-02-28T00:00:00Z",
+                },
+                "usage_series": {
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "window_days": 7,
+                    "timeseries": [],
+                    "generated_at": "2026-02-28T00:00:00Z",
+                },
+                "delivery_operations": {
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "window_hours": 24,
+                    "window_start": "2026-02-27T00:00:00Z",
+                    "window_end": "2026-02-28T00:00:00Z",
+                    "total_deliveries": len(delivery_rows),
+                    "replay_count": sum(1 for item in delivery_rows if item.get("replay_of_delivery_id") is not None),
+                    "status_counts": delivery_counts,
+                    "latency": {
+                        "sample_count": 0,
+                        "slo_target_ms": 1000.0,
+                        "avg_ms": 0.0,
+                        "p95_ms": 0.0,
+                        "max_ms": 0.0,
+                        "slo_attainment_rate": 0.0,
+                    },
+                    "recovery_counters": {
+                        "pending_to_delivered_count": 0,
+                        "pending_to_dead_lettered_count": 0,
+                        "total_recovered": 0,
+                        "pending_recovery_rate": 0.0,
+                        "delivered_recovery_share": 0.0,
+                        "dead_lettered_recovery_share": 0.0,
+                    },
+                    "by_transport": [],
+                    "by_route": [],
+                },
+                "pending_access_requests": pending_access_requests[:20],
+            }
+            return httpx.Response(200, json={"ok": True, "overview": overview})
+        if request.url.path == "/v1/portal/personal/overview" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            organization = organizations.get(org_id)
+            workspace = workspaces.get(workspace_id)
+            if organization is None or workspace is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            my_requests = [
+                item
+                for item in access_requests.values()
+                if item.get("org_id") == org_id and item.get("workspace_id") == workspace_id
+            ]
+            my_state_counts = {"pending": 0, "under_review": 0, "approved": 0, "rejected": 0, "waitlisted": 0, "expired": 0}
+            for item in my_requests:
+                item_state = str(item.get("state") or "")
+                if item_state in my_state_counts:
+                    my_state_counts[item_state] = int(my_state_counts[item_state]) + 1
+            overview = {
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "actor_id": "actor://conformance/requester",
+                "roles": ["member"],
+                "organization": {
+                    "org_id": organization["org_id"],
+                    "name": organization["name"],
+                    "status": organization["status"],
+                },
+                "workspace": {
+                    "workspace_id": workspace["workspace_id"],
+                    "name": workspace["name"],
+                    "environment": workspace["environment"],
+                    "status": workspace["status"],
+                },
+                "my_metrics": {
+                    "open_access_requests_count": (
+                        int(my_state_counts["pending"])
+                        + int(my_state_counts["under_review"])
+                        + int(my_state_counts["waitlisted"])
+                    ),
+                    "approved_access_requests_count": int(my_state_counts["approved"]),
+                    "rejected_or_expired_access_requests_count": int(my_state_counts["rejected"]) + int(my_state_counts["expired"]),
+                },
+                "my_access_request_counts": my_state_counts,
+                "my_access_requests": my_requests[:50],
+                "quota_policy": quota_policies.get((org_id, workspace_id)),
+                "usage_summary": {
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "window": "day",
+                    "dimensions": {
+                        "intents_per_day": build_usage_window(1000),
+                    },
+                    "generated_at": "2026-02-28T00:00:00Z",
+                },
+                "usage_series": {
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "window_days": 7,
+                    "timeseries": [],
+                    "generated_at": "2026-02-28T00:00:00Z",
+                },
+                "available_actions": {
+                    "submit_access_request": True,
+                    "view_enterprise_admin_console": False,
+                    "review_access_requests": False,
+                },
+            }
+            return httpx.Response(200, json={"ok": True, "overview": overview})
         if request.url.path == "/v1/quotas" and request.method == "PATCH":
             if not has_authorization(request):
                 return httpx.Response(401, json={"error": "unauthorized"})
@@ -1737,7 +1985,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 41
+    assert len(results) == 42
     assert all(r.passed for r in results), [f"{r.name}: {r.details}" for r in results if not r.passed]
 
 
@@ -1754,7 +2002,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 41
+    assert len(results) == 42
     assert all(not result.passed for result in results)
 
 
