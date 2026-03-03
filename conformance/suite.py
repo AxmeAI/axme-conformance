@@ -1321,44 +1321,83 @@ def _check_enterprise_access_requests_contract(client: httpx.Client) -> Contract
         return ContractResult("enterprise_access_requests", False, error)
     assert org_id is not None
 
-    create_response = client.post(
+    unauthorized_create = client.post(
         "/v1/access-requests",
+        headers={"Authorization": ""},
         json={
             "request_type": "join_organization",
             "requester_actor_id": "actor://conformance/requester",
             "org_id": org_id,
             "requested_role": "member",
-            "justification": "Need tenant access for conformance checks.",
         },
     )
-    if create_response.status_code != 200:
-        return ContractResult("enterprise_access_requests", False, f"access request create status={create_response.status_code}")
-    create_data = create_response.json()
-    access_request = create_data.get("access_request")
-    if create_data.get("ok") is not True or not isinstance(access_request, dict):
-        return ContractResult("enterprise_access_requests", False, "invalid access request create response shape")
-    access_request_id = access_request.get("access_request_id")
-    if not _is_uuid(access_request_id):
-        return ContractResult("enterprise_access_requests", False, "invalid access_request_id")
+    if unauthorized_create.status_code != 401:
+        return ContractResult(
+            "enterprise_access_requests",
+            False,
+            f"expected unauthorized create status=401 got={unauthorized_create.status_code}",
+        )
 
-    review_response = client.post(
-        f"/v1/access-requests/{access_request_id}/review",
-        json={
-            "decision": "approve",
-            "reviewer_actor_id": "actor://conformance/reviewer",
-            "review_comment": "approved in enterprise conformance smoke checks",
-        },
-    )
-    if review_response.status_code != 200:
-        return ContractResult("enterprise_access_requests", False, f"access request review status={review_response.status_code}")
-    review_data = review_response.json()
-    reviewed_request = review_data.get("access_request")
-    if review_data.get("ok") is not True or not isinstance(reviewed_request, dict):
-        return ContractResult("enterprise_access_requests", False, "invalid access request review response shape")
-    if reviewed_request.get("access_request_id") != access_request_id:
-        return ContractResult("enterprise_access_requests", False, "access_request_id mismatch after review")
-    if reviewed_request.get("state") != "approved":
-        return ContractResult("enterprise_access_requests", False, "review did not transition state to approved")
+    decision_states = {
+        "approve": "approved",
+        "reject": "rejected",
+        "waitlist": "waitlisted",
+    }
+    for decision, expected_state in decision_states.items():
+        create_response = client.post(
+            "/v1/access-requests",
+            json={
+                "request_type": "join_organization",
+                "requester_actor_id": "actor://conformance/requester",
+                "org_id": org_id,
+                "requested_role": "member",
+                "justification": f"Need tenant access ({decision}) for conformance checks.",
+            },
+        )
+        if create_response.status_code != 200:
+            return ContractResult(
+                "enterprise_access_requests",
+                False,
+                f"access request create status={create_response.status_code}",
+            )
+        create_data = create_response.json()
+        access_request = create_data.get("access_request")
+        if create_data.get("ok") is not True or not isinstance(access_request, dict):
+            return ContractResult("enterprise_access_requests", False, "invalid access request create response shape")
+        access_request_id = access_request.get("access_request_id")
+        if not _is_uuid(access_request_id):
+            return ContractResult("enterprise_access_requests", False, "invalid access_request_id")
+        if access_request.get("state") != "pending":
+            return ContractResult("enterprise_access_requests", False, "new access request must start in pending state")
+
+        review_response = client.post(
+            f"/v1/access-requests/{access_request_id}/review",
+            json={
+                "decision": decision,
+                "reviewer_actor_id": "actor://conformance/reviewer",
+                "review_comment": f"{decision} in enterprise conformance smoke checks",
+            },
+        )
+        if review_response.status_code != 200:
+            return ContractResult(
+                "enterprise_access_requests",
+                False,
+                f"access request review status={review_response.status_code}",
+            )
+        review_data = review_response.json()
+        reviewed_request = review_data.get("access_request")
+        if review_data.get("ok") is not True or not isinstance(reviewed_request, dict):
+            return ContractResult("enterprise_access_requests", False, "invalid access request review response shape")
+        if reviewed_request.get("access_request_id") != access_request_id:
+            return ContractResult("enterprise_access_requests", False, "access_request_id mismatch after review")
+        if reviewed_request.get("state") != expected_state:
+            return ContractResult(
+                "enterprise_access_requests",
+                False,
+                f"review decision={decision} did not transition to {expected_state}",
+            )
+        if reviewed_request.get("reviewer_actor_id") != "actor://conformance/reviewer":
+            return ContractResult("enterprise_access_requests", False, "reviewer_actor_id was not persisted")
     return ContractResult("enterprise_access_requests", True, "ok")
 
 
