@@ -1479,13 +1479,146 @@ def _check_enterprise_quotas_usage_contract(client: httpx.Client) -> ContractRes
     if timeseries_data.get("ok") is not True or not _is_usage_series_shape(series):
         return ContractResult("enterprise_quotas_usage", False, "invalid usage timeseries response shape")
 
+    for baseline_message in ("rollup baseline 1", "rollup baseline 2"):
+        baseline_intent = client.post(
+            "/v1/intents",
+            json={
+                "intent_type": "notify.message.v1",
+                "correlation_id": str(uuid4()),
+                "from_agent": "agent://conformance/sender",
+                "to_agent": "agent://conformance/receiver",
+                "payload": {
+                    "text": baseline_message,
+                    "tenant": {"org_id": org_id, "workspace_id": workspace_id},
+                },
+            },
+        )
+        if baseline_intent.status_code != 200:
+            return ContractResult("enterprise_quotas_usage", False, f"baseline rollup intent status={baseline_intent.status_code}")
+
+    first_rollup = client.post(
+        "/v1/usage/rollups/daily",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_days": 1},
+    )
+    if first_rollup.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"first rollup status={first_rollup.status_code}")
+    first_rollup_data = first_rollup.json()
+    first_rollup_payload = first_rollup_data.get("rollup")
+    if first_rollup_data.get("ok") is not True or not isinstance(first_rollup_payload, dict):
+        return ContractResult("enterprise_quotas_usage", False, "invalid first rollup response shape")
+    if int(first_rollup_payload.get("upserted") or 0) < 1:
+        return ContractResult("enterprise_quotas_usage", False, "expected at least one rollup upsert in first pass")
+
+    timeseries_day_response = client.get(
+        "/v1/usage/timeseries",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_days": 1},
+    )
+    if timeseries_day_response.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"timeseries day status={timeseries_day_response.status_code}")
+    timeseries_day_data = timeseries_day_response.json()
+    day_series = timeseries_day_data.get("series")
+    if timeseries_day_data.get("ok") is not True or not _is_usage_series_shape(day_series):
+        return ContractResult("enterprise_quotas_usage", False, "invalid day timeseries response shape")
+    day_points = day_series.get("points", []) if isinstance(day_series, dict) else []
+    if not day_points:
+        return ContractResult("enterprise_quotas_usage", False, "day timeseries points missing after rollup baseline writes")
+    latest_day_point = max(day_points, key=lambda point: str(point.get("at", "")))
+    latest_day_dimensions = latest_day_point.get("dimensions") if isinstance(latest_day_point, dict) else None
+    if not isinstance(latest_day_dimensions, dict):
+        return ContractResult("enterprise_quotas_usage", False, "invalid day timeseries point dimensions shape")
+    baseline_intents_used = latest_day_dimensions.get("intents_per_day")
+    if not isinstance(baseline_intents_used, int) or baseline_intents_used < 2:
+        return ContractResult("enterprise_quotas_usage", False, "expected >=2 intents_per_day in day timeseries baseline")
+
+    interleaved_intent = client.post(
+        "/v1/intents",
+        json={
+            "intent_type": "notify.message.v1",
+            "correlation_id": str(uuid4()),
+            "from_agent": "agent://conformance/sender",
+            "to_agent": "agent://conformance/receiver",
+            "payload": {
+                "text": "rollup interleaved write",
+                "tenant": {"org_id": org_id, "workspace_id": workspace_id},
+            },
+        },
+    )
+    if interleaved_intent.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"interleaved rollup intent status={interleaved_intent.status_code}")
+
+    second_rollup = client.post(
+        "/v1/usage/rollups/daily",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_days": 1},
+    )
+    if second_rollup.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"second rollup status={second_rollup.status_code}")
+
+    timeseries_day_after_response = client.get(
+        "/v1/usage/timeseries",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_days": 1},
+    )
+    if timeseries_day_after_response.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"timeseries day-after status={timeseries_day_after_response.status_code}")
+    timeseries_day_after_data = timeseries_day_after_response.json()
+    day_series_after = timeseries_day_after_data.get("series")
+    if timeseries_day_after_data.get("ok") is not True or not _is_usage_series_shape(day_series_after):
+        return ContractResult("enterprise_quotas_usage", False, "invalid day-after timeseries response shape")
+    day_points_after = day_series_after.get("points", []) if isinstance(day_series_after, dict) else []
+    if not day_points_after:
+        return ContractResult("enterprise_quotas_usage", False, "day-after timeseries points missing")
+    latest_day_point_after = max(day_points_after, key=lambda point: str(point.get("at", "")))
+    latest_day_dimensions_after = latest_day_point_after.get("dimensions") if isinstance(latest_day_point_after, dict) else None
+    if not isinstance(latest_day_dimensions_after, dict):
+        return ContractResult("enterprise_quotas_usage", False, "invalid day-after point dimensions shape")
+    interleaved_intents_used = latest_day_dimensions_after.get("intents_per_day")
+    if not isinstance(interleaved_intents_used, int):
+        return ContractResult("enterprise_quotas_usage", False, "invalid interleaved intents_per_day value")
+    if interleaved_intents_used < baseline_intents_used + 1:
+        return ContractResult(
+            "enterprise_quotas_usage",
+            False,
+            "day timeseries intents_per_day did not increase after interleaved write + rollup",
+        )
+
+    timeseries_month_response = client.get(
+        "/v1/usage/timeseries",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_days": 30},
+    )
+    if timeseries_month_response.status_code != 200:
+        return ContractResult("enterprise_quotas_usage", False, f"timeseries month status={timeseries_month_response.status_code}")
+    timeseries_month_data = timeseries_month_response.json()
+    month_series = timeseries_month_data.get("series")
+    if timeseries_month_data.get("ok") is not True or not _is_usage_series_shape(month_series):
+        return ContractResult("enterprise_quotas_usage", False, "invalid month timeseries response shape")
+    month_points = month_series.get("points", []) if isinstance(month_series, dict) else []
+    if not month_points:
+        return ContractResult("enterprise_quotas_usage", False, "month timeseries points missing")
+    latest_month_point = max(month_points, key=lambda point: str(point.get("at", "")))
+    latest_month_dimensions = latest_month_point.get("dimensions") if isinstance(latest_month_point, dict) else None
+    if not isinstance(latest_month_dimensions, dict):
+        return ContractResult("enterprise_quotas_usage", False, "invalid month timeseries point dimensions shape")
+    month_intents_used = latest_month_dimensions.get("intents_per_day")
+    if not isinstance(month_intents_used, int):
+        return ContractResult("enterprise_quotas_usage", False, "invalid month intents_per_day value")
+    if month_intents_used < interleaved_intents_used:
+        return ContractResult("enterprise_quotas_usage", False, "window boundary regression: 30-day view dropped current-day rollup")
+
+    strict_workspace_id, strict_workspace_error = _create_enterprise_workspace_for_contract(
+        client,
+        org_id=org_id,
+        name="Conformance Quotas Strict Workspace",
+    )
+    if strict_workspace_error:
+        return ContractResult("enterprise_quotas_usage", False, strict_workspace_error)
+    assert strict_workspace_id is not None
+
     strict_dimensions = dict(dimensions)
     strict_dimensions["intents_per_day"] = 1
     strict_patch = client.patch(
         "/v1/quotas",
         json={
             "org_id": org_id,
-            "workspace_id": workspace_id,
+            "workspace_id": strict_workspace_id,
             "dimensions": strict_dimensions,
             "soft_threshold_percent": 80,
             "hard_enforcement": True,
@@ -1504,7 +1637,7 @@ def _check_enterprise_quotas_usage_contract(client: httpx.Client) -> ContractRes
             "to_agent": "agent://conformance/receiver",
             "payload": {
                 "text": "quota baseline",
-                "tenant": {"org_id": org_id, "workspace_id": workspace_id},
+                "tenant": {"org_id": org_id, "workspace_id": strict_workspace_id},
             },
         },
     )
@@ -1519,7 +1652,7 @@ def _check_enterprise_quotas_usage_contract(client: httpx.Client) -> ContractRes
             "to_agent": "agent://conformance/receiver",
             "payload": {
                 "text": "quota exceed",
-                "tenant": {"org_id": org_id, "workspace_id": workspace_id},
+                "tenant": {"org_id": org_id, "workspace_id": strict_workspace_id},
             },
         },
     )

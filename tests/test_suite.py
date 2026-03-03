@@ -408,6 +408,32 @@ def test_run_contract_suite_happy_path() -> None:
                     },
                 },
             )
+        if request.url.path == "/v1/usage/rollups/daily" and request.method == "POST":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            window_days = request.url.params.get("window_days")
+            if not isinstance(org_id, str) or not isinstance(workspace_id, str):
+                return httpx.Response(422, json={"error": "missing org/workspace"})
+            workspace = workspaces.get(workspace_id)
+            if workspace is None:
+                return httpx.Response(404, json={"error": "workspace not found"})
+            if workspace["org_id"] != org_id:
+                return httpx.Response(403, json={"error": "workspace outside org scope"})
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "rollup": {
+                        "org_id": org_id,
+                        "workspace_id": workspace_id,
+                        "window_days": int(window_days or 30),
+                        "upserted": 1,
+                        "generated_at": "2026-02-28T00:00:04Z",
+                    },
+                },
+            )
         if request.url.path == "/v1/service-accounts" and request.method == "POST":
             if not has_authorization(request):
                 return httpx.Response(401, json={"error": "unauthorized"})
@@ -1374,7 +1400,7 @@ def test_run_contract_suite_happy_path() -> None:
         transport_factory=lambda: httpx.MockTransport(handler),
     )
     assert len(results) == 41
-    assert all(r.passed for r in results)
+    assert all(r.passed for r in results), [f"{r.name}: {r.details}" for r in results if not r.passed]
 
 
 def test_run_contract_suite_reports_failures() -> None:
