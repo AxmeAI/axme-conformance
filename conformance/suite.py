@@ -1936,9 +1936,9 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
         "/v1/routing/endpoints",
         json={
             "principal_id": principal_id,
-            "transport_type": "http",
-            "endpoint_url": "https://conformance-router-primary.example/intents",
-            "auth_mode": "jwt",
+            "transport_type": "matrix",
+            "endpoint_url": "matrix://conformance-router-primary",
+            "auth_mode": "signed_key",
             "region": "us-central1",
             "failover_policy": "same_region",
             "priority": 5,
@@ -1995,6 +1995,54 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
     if fallback_mark_healthy.status_code != 200:
         return ContractResult("enterprise_naming_routing_delivery", False, f"fallback route health update status={fallback_mark_healthy.status_code}")
 
+    queue_route_response = client.post(
+        "/v1/routing/endpoints",
+        json={
+            "principal_id": principal_id,
+            "transport_type": "queue",
+            "endpoint_url": "queue://conformance-router",
+            "auth_mode": "none",
+            "region": "us-central1",
+            "priority": 15,
+        },
+    )
+    if queue_route_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"routing queue endpoint register status={queue_route_response.status_code}",
+        )
+    queue_route_payload = queue_route_response.json().get("route")
+    if not isinstance(queue_route_payload, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid queue route response shape")
+    queue_route_id = queue_route_payload.get("route_id")
+    if not isinstance(queue_route_id, str) or len(queue_route_id) < 8:
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid queue_route_id")
+
+    queue_mark_healthy = client.patch(
+        f"/v1/routing/endpoints/{queue_route_id}",
+        json={"health_status": "healthy"},
+    )
+    if queue_mark_healthy.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"queue route health update status={queue_mark_healthy.status_code}")
+
+    matrix_binding_response = client.post(
+        "/v1/transports/bindings",
+        json={
+            "principal_id": principal_id,
+            "transport_type": "matrix",
+            "transport_handle": "@conformance-router:matrix.ax",
+            "priority": 5,
+            "status": "active",
+        },
+    )
+    if matrix_binding_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"matrix transport binding upsert status={matrix_binding_response.status_code}",
+        )
+
     binding_response = client.post(
         "/v1/transports/bindings",
         json={
@@ -2010,6 +2058,23 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
             "enterprise_naming_routing_delivery",
             False,
             f"transport binding upsert status={binding_response.status_code}",
+        )
+
+    queue_binding_response = client.post(
+        "/v1/transports/bindings",
+        json={
+            "principal_id": principal_id,
+            "transport_type": "queue",
+            "transport_handle": "queue://conformance-router",
+            "priority": 20,
+            "status": "active",
+        },
+    )
+    if queue_binding_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"queue transport binding upsert status={queue_binding_response.status_code}",
         )
 
     resolve_response = client.post(
@@ -2028,6 +2093,8 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
     selected_route = resolution.get("selected_route")
     if not isinstance(selected_route, dict) or selected_route.get("route_id") != fallback_route_id:
         return ContractResult("enterprise_naming_routing_delivery", False, "routing resolve fallback route mismatch")
+    if selected_route.get("transport_type") != "http":
+        return ContractResult("enterprise_naming_routing_delivery", False, "routing resolve fallback transport should be http")
     if resolution.get("fallback_applied") is not True:
         return ContractResult("enterprise_naming_routing_delivery", False, "fallback_applied should be true for unhealthy primary route")
     if resolution.get("fallback_from_route_id") != route_id:
@@ -2056,6 +2123,9 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
         return ContractResult("enterprise_naming_routing_delivery", False, "invalid delivery_id")
     if delivery.get("route_id") != fallback_route_id:
         return ContractResult("enterprise_naming_routing_delivery", False, "delivery route_id should use fallback")
+    if delivery.get("transport_type") != "http":
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery transport should be http on fallback")
+    expected_delivery_keys = set(delivery.keys())
 
     replay_response = client.post(f"/v1/deliveries/{delivery_id}/replay")
     if replay_response.status_code != 200:
@@ -2065,6 +2135,8 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
         return ContractResult("enterprise_naming_routing_delivery", False, "invalid delivery replay response shape")
     if replay_delivery.get("replay_of_delivery_id") != delivery_id:
         return ContractResult("enterprise_naming_routing_delivery", False, "delivery replay linkage mismatch")
+    if set(replay_delivery.keys()) != expected_delivery_keys:
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery replay response key shape mismatch")
 
     disable_fallback_route = client.patch(
         f"/v1/routing/endpoints/{fallback_route_id}",
@@ -2072,6 +2144,52 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
     )
     if disable_fallback_route.status_code != 200:
         return ContractResult("enterprise_naming_routing_delivery", False, f"fallback route disable status={disable_fallback_route.status_code}")
+
+    queue_resolve_response = client.post(
+        "/v1/routing/resolve",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "alias": "agent://conformance/router",
+        },
+    )
+    if queue_resolve_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"queue fallback resolve status={queue_resolve_response.status_code}")
+    queue_resolution = queue_resolve_response.json().get("resolution")
+    if not isinstance(queue_resolution, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid queue resolution response shape")
+    queue_selected = queue_resolution.get("selected_route")
+    if not isinstance(queue_selected, dict) or queue_selected.get("route_id") != queue_route_id:
+        return ContractResult("enterprise_naming_routing_delivery", False, "queue fallback route selection mismatch")
+    if queue_selected.get("transport_type") != "queue":
+        return ContractResult("enterprise_naming_routing_delivery", False, "queue fallback transport should be queue")
+
+    queue_delivery_response = client.post(
+        "/v1/deliveries",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "alias": "agent://conformance/router",
+            "payload": {"event": "conformance.delivery.queue"},
+            "idempotency_key": f"conformance-dlv-queue-{uuid4()}",
+        },
+    )
+    if queue_delivery_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"queue delivery submit status={queue_delivery_response.status_code}")
+    queue_delivery = queue_delivery_response.json().get("delivery")
+    if not isinstance(queue_delivery, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid queue delivery response shape")
+    if queue_delivery.get("transport_type") != "queue":
+        return ContractResult("enterprise_naming_routing_delivery", False, "queue delivery transport mismatch")
+    if set(queue_delivery.keys()) != expected_delivery_keys:
+        return ContractResult("enterprise_naming_routing_delivery", False, "queue delivery response key shape mismatch")
+
+    disable_queue_route = client.patch(
+        f"/v1/routing/endpoints/{queue_route_id}",
+        json={"status": "inactive"},
+    )
+    if disable_queue_route.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"queue route disable status={disable_queue_route.status_code}")
 
     pending_delivery_response = client.post(
         "/v1/deliveries",
@@ -2110,6 +2228,16 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
         return ContractResult("enterprise_naming_routing_delivery", False, "delivery operations missing status_counts")
     if int(status_counts.get("pending", 0)) < 1:
         return ContractResult("enterprise_naming_routing_delivery", False, "delivery operations missing pending status count")
+    latency_payload = operations_payload.get("latency")
+    if not isinstance(latency_payload, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery operations missing latency rollup")
+    if "sample_count" not in latency_payload or "slo_attainment_rate" not in latency_payload:
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery operations latency rollup shape mismatch")
+    recovery_counters = operations_payload.get("recovery_counters")
+    if not isinstance(recovery_counters, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "delivery operations missing recovery counters")
+    if int(recovery_counters.get("pending_to_dead_lettered_count", 0)) != 0:
+        return ContractResult("enterprise_naming_routing_delivery", False, "recovery counters should be zero before reconcile")
 
     reconcile_response = client.post(
         "/v1/deliveries/reconcile",
@@ -2130,6 +2258,70 @@ def _check_enterprise_naming_routing_delivery_contract(client: httpx.Client) -> 
     reconciled_ids = reconcile_payload.get("reconciled_delivery_ids")
     if not isinstance(reconciled_ids, list) or pending_delivery_id not in reconciled_ids:
         return ContractResult("enterprise_naming_routing_delivery", False, "reconciled delivery id missing from reconcile response")
+
+    pending_delivery_response_2 = client.post(
+        "/v1/deliveries",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "alias": "agent://conformance/router",
+            "payload": {"event": "conformance.delivery.pending.recovered"},
+            "idempotency_key": f"conformance-dlv-pending-recovered-{uuid4()}",
+        },
+    )
+    if pending_delivery_response_2.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"second pending delivery submit status={pending_delivery_response_2.status_code}")
+    pending_delivery_2 = pending_delivery_response_2.json().get("delivery")
+    if not isinstance(pending_delivery_2, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid second pending delivery response shape")
+    pending_delivery_id_2 = pending_delivery_2.get("delivery_id")
+    if not isinstance(pending_delivery_id_2, str) or len(pending_delivery_id_2) < 8:
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid second pending delivery id")
+    if pending_delivery_2.get("status") != "pending":
+        return ContractResult("enterprise_naming_routing_delivery", False, "second pending delivery status should be pending")
+
+    reconcile_to_delivered_response = client.post(
+        "/v1/deliveries/reconcile",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "max_pending_age_seconds": 0,
+            "limit": 100,
+            "target_status": "delivered",
+            "reason": "operator recovery",
+        },
+    )
+    if reconcile_to_delivered_response.status_code != 200:
+        return ContractResult(
+            "enterprise_naming_routing_delivery",
+            False,
+            f"delivery reconcile-to-delivered status={reconcile_to_delivered_response.status_code}",
+        )
+    reconcile_to_delivered = reconcile_to_delivered_response.json().get("reconciliation")
+    if not isinstance(reconcile_to_delivered, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid reconcile-to-delivered response shape")
+    if str(reconcile_to_delivered.get("target_status")) != "delivered":
+        return ContractResult("enterprise_naming_routing_delivery", False, "reconcile-to-delivered target_status mismatch")
+    reconciled_ids_2 = reconcile_to_delivered.get("reconciled_delivery_ids")
+    if not isinstance(reconciled_ids_2, list) or pending_delivery_id_2 not in reconciled_ids_2:
+        return ContractResult("enterprise_naming_routing_delivery", False, "reconcile-to-delivered id missing from response")
+
+    operations_after_response = client.get(
+        "/v1/deliveries-operations",
+        params={"org_id": org_id, "workspace_id": workspace_id, "window_hours": 24},
+    )
+    if operations_after_response.status_code != 200:
+        return ContractResult("enterprise_naming_routing_delivery", False, f"delivery operations-after status={operations_after_response.status_code}")
+    operations_after_payload = operations_after_response.json().get("operations")
+    if not isinstance(operations_after_payload, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "invalid operations-after response shape")
+    recovery_after = operations_after_payload.get("recovery_counters")
+    if not isinstance(recovery_after, dict):
+        return ContractResult("enterprise_naming_routing_delivery", False, "missing recovery counters after reconcile")
+    if int(recovery_after.get("pending_to_dead_lettered_count", 0)) < 1:
+        return ContractResult("enterprise_naming_routing_delivery", False, "recovery counter pending_to_dead_lettered_count should be >=1")
+    if int(recovery_after.get("pending_to_delivered_count", 0)) < 1:
+        return ContractResult("enterprise_naming_routing_delivery", False, "recovery counter pending_to_delivered_count should be >=1")
 
     return ContractResult("enterprise_naming_routing_delivery", True, "ok")
 

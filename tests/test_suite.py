@@ -30,6 +30,7 @@ def test_run_contract_suite_happy_path() -> None:
     endpoint_routes: dict[str, dict[str, object]] = {}
     transport_bindings: dict[str, dict[str, object]] = {}
     deliveries: dict[str, dict[str, object]] = {}
+    reconcile_events: list[dict[str, object]] = []
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -1364,7 +1365,24 @@ def test_run_contract_suite_happy_path() -> None:
             ]
             if not routes:
                 return httpx.Response(404, json={"error": "route_not_found"})
-            routes.sort(key=lambda item: int(item.get("priority", 100)))
+            binding_candidates = [
+                item
+                for item in transport_bindings.values()
+                if item.get("principal_id") == principal["principal_id"] and item.get("status") == "active"
+            ]
+            binding_candidates.sort(key=lambda item: int(item.get("priority", 100)))
+            transport_priority: dict[str, int] = {}
+            for binding in binding_candidates:
+                transport_type = str(binding.get("transport_type") or "")
+                if transport_type and transport_type not in transport_priority:
+                    transport_priority[transport_type] = int(binding.get("priority", 100))
+            routes.sort(
+                key=lambda item: (
+                    int(transport_priority.get(str(item.get("transport_type") or ""), 10000)),
+                    int(item.get("priority", 100)),
+                    str(item.get("route_id") or ""),
+                )
+            )
             primary_route = routes[0]
             selected_route = primary_route
             fallback_applied = False
@@ -1435,7 +1453,24 @@ def test_run_contract_suite_happy_path() -> None:
             active_routes = [route for route in routes if route.get("status") == "active"]
             if not active_routes:
                 return httpx.Response(404, json={"error": "route_not_found"})
-            active_routes.sort(key=lambda item: int(item.get("priority", 100)))
+            binding_candidates = [
+                item
+                for item in transport_bindings.values()
+                if item.get("principal_id") == principal["principal_id"] and item.get("status") == "active"
+            ]
+            binding_candidates.sort(key=lambda item: int(item.get("priority", 100)))
+            transport_priority: dict[str, int] = {}
+            for binding in binding_candidates:
+                transport_type = str(binding.get("transport_type") or "")
+                if transport_type and transport_type not in transport_priority:
+                    transport_priority[transport_type] = int(binding.get("priority", 100))
+            active_routes.sort(
+                key=lambda item: (
+                    int(transport_priority.get(str(item.get("transport_type") or ""), 10000)),
+                    int(item.get("priority", 100)),
+                    str(item.get("route_id") or ""),
+                )
+            )
             primary_route = active_routes[0]
             selected_route = primary_route
             primary_health = str(primary_route.get("health_status") or "unknown")
@@ -1485,6 +1520,8 @@ def test_run_contract_suite_happy_path() -> None:
             by_transport: dict[str, dict[str, object]] = {}
             by_route: dict[str, dict[str, object]] = {}
             replay_count = 0
+            latency_samples_ms: list[float] = []
+            by_transport_latency_samples_ms: dict[str, list[float]] = {}
             for item in filtered:
                 status = str(item.get("status") or "submitted")
                 transport_type = str(item.get("transport_type") or "unknown")
@@ -1503,6 +1540,14 @@ def test_run_contract_suite_happy_path() -> None:
                 transport_bucket = by_transport[transport_type]
                 transport_bucket["total"] = int(transport_bucket["total"]) + 1
                 transport_bucket["status_counts"][status] = int(transport_bucket["status_counts"].get(status, 0)) + 1
+                if status in {"delivered", "failed", "dead_lettered"}:
+                    created_at = str(item.get("created_at") or "")
+                    updated_at = str(item.get("updated_at") or "")
+                    latency_ms = 10000.0 if created_at != updated_at else 0.0
+                    latency_samples_ms.append(latency_ms)
+                    if transport_type not in by_transport_latency_samples_ms:
+                        by_transport_latency_samples_ms[transport_type] = []
+                    by_transport_latency_samples_ms[transport_type].append(latency_ms)
                 if route_id not in by_route:
                     by_route[route_id] = {
                         "route_id": route_id,
@@ -1516,6 +1561,47 @@ def test_run_contract_suite_happy_path() -> None:
                 total = int(bucket["total"])
                 errors = int(bucket["status_counts"]["failed"]) + int(bucket["status_counts"]["dead_lettered"])
                 bucket["error_rate"] = float(errors / total) if total > 0 else 0.0
+                transport_type = str(bucket["transport_type"])
+                transport_latencies = by_transport_latency_samples_ms.get(transport_type, [])
+                sample_count = len(transport_latencies)
+                avg_ms = float(sum(transport_latencies) / sample_count) if sample_count > 0 else 0.0
+                bucket["latency"] = {
+                    "sample_count": sample_count,
+                    "slo_target_ms": 1000.0,
+                    "avg_ms": avg_ms,
+                    "p95_ms": avg_ms if sample_count > 0 else 0.0,
+                    "max_ms": max(transport_latencies) if sample_count > 0 else 0.0,
+                    "slo_attainment_rate": (
+                        float(sum(1 for value in transport_latencies if value <= 1000.0)) / float(sample_count)
+                        if sample_count > 0
+                        else 0.0
+                    ),
+                }
+            latency_sample_count = len(latency_samples_ms)
+            latency_avg_ms = (
+                float(sum(latency_samples_ms) / float(latency_sample_count))
+                if latency_sample_count > 0
+                else 0.0
+            )
+            pending_to_delivered_count = 0
+            pending_to_dead_lettered_count = 0
+            for event in reconcile_events:
+                if org_id is not None and event.get("org_id") != org_id:
+                    continue
+                if workspace_id is not None and event.get("workspace_id") != workspace_id:
+                    continue
+                count_value = int(event.get("reconciled_count") or 0)
+                if str(event.get("target_status") or "dead_lettered") == "delivered":
+                    pending_to_delivered_count += count_value
+                else:
+                    pending_to_dead_lettered_count += count_value
+            total_recovered = pending_to_delivered_count + pending_to_dead_lettered_count
+            recovery_denominator = total_recovered + int(status_counts["pending"])
+            pending_recovery_rate = (
+                float(total_recovered) / float(recovery_denominator)
+                if recovery_denominator > 0
+                else 0.0
+            )
             return httpx.Response(
                 200,
                 json={
@@ -1529,6 +1615,34 @@ def test_run_contract_suite_happy_path() -> None:
                         "total_deliveries": len(filtered),
                         "replay_count": replay_count,
                         "status_counts": status_counts,
+                        "latency": {
+                            "sample_count": latency_sample_count,
+                            "slo_target_ms": 1000.0,
+                            "avg_ms": latency_avg_ms,
+                            "p95_ms": latency_avg_ms if latency_sample_count > 0 else 0.0,
+                            "max_ms": max(latency_samples_ms) if latency_sample_count > 0 else 0.0,
+                            "slo_attainment_rate": (
+                                float(sum(1 for value in latency_samples_ms if value <= 1000.0)) / float(latency_sample_count)
+                                if latency_sample_count > 0
+                                else 0.0
+                            ),
+                        },
+                        "recovery_counters": {
+                            "pending_to_delivered_count": pending_to_delivered_count,
+                            "pending_to_dead_lettered_count": pending_to_dead_lettered_count,
+                            "total_recovered": total_recovered,
+                            "pending_recovery_rate": pending_recovery_rate,
+                            "delivered_recovery_share": (
+                                float(pending_to_delivered_count) / float(total_recovered)
+                                if total_recovered > 0
+                                else 0.0
+                            ),
+                            "dead_lettered_recovery_share": (
+                                float(pending_to_dead_lettered_count) / float(total_recovered)
+                                if total_recovered > 0
+                                else 0.0
+                            ),
+                        },
                         "by_transport": list(by_transport.values()),
                         "by_route": list(by_route.values()),
                     },
@@ -1540,7 +1654,12 @@ def test_run_contract_suite_happy_path() -> None:
             body = json.loads(request.content.decode("utf-8"))
             org_id = body.get("org_id")
             workspace_id = body.get("workspace_id")
+            target_status = str(body.get("target_status") or "dead_lettered")
+            reason = body.get("reason")
+            if target_status not in {"delivered", "dead_lettered"}:
+                return httpx.Response(422, json={"error": "invalid_target_status"})
             reconciled_ids: list[str] = []
+            by_target_status = {"delivered": 0, "dead_lettered": 0}
             by_transport: dict[str, int] = {}
             by_route: dict[str, int] = {}
             for delivery_id, item in list(deliveries.items()):
@@ -1551,15 +1670,27 @@ def test_run_contract_suite_happy_path() -> None:
                 if workspace_id is not None and item.get("workspace_id") != workspace_id:
                     continue
                 next_item = dict(item)
-                next_item["status"] = "dead_lettered"
-                next_item["error_detail"] = "reconciled pending delivery after timeout"
+                next_item["status"] = target_status
+                if target_status == "dead_lettered":
+                    next_item["error_detail"] = str(reason or "reconciled pending delivery after timeout")
+                else:
+                    next_item["error_detail"] = str(reason) if isinstance(reason, str) else None
                 next_item["updated_at"] = "2026-02-28T00:00:10Z"
                 deliveries[delivery_id] = next_item
                 reconciled_ids.append(delivery_id)
+                by_target_status[target_status] = int(by_target_status[target_status]) + 1
                 transport_type = str(next_item.get("transport_type") or "unknown")
                 route_id = str(next_item.get("route_id") or "unknown")
                 by_transport[transport_type] = int(by_transport.get(transport_type, 0)) + 1
                 by_route[route_id] = int(by_route.get(route_id, 0)) + 1
+            reconcile_events.append(
+                {
+                    "org_id": org_id,
+                    "workspace_id": workspace_id,
+                    "target_status": target_status,
+                    "reconciled_count": len(reconciled_ids),
+                }
+            )
             return httpx.Response(
                 200,
                 json={
@@ -1569,8 +1700,10 @@ def test_run_contract_suite_happy_path() -> None:
                         "workspace_id": workspace_id,
                         "max_pending_age_seconds": int(body.get("max_pending_age_seconds", 300)),
                         "limit": int(body.get("limit", 500)),
+                        "target_status": target_status,
                         "reconciled_count": len(reconciled_ids),
                         "reconciled_delivery_ids": reconciled_ids,
+                        "by_target_status": by_target_status,
                         "by_transport": [
                             {"transport_type": key, "count": by_transport[key]}
                             for key in sorted(by_transport.keys())
