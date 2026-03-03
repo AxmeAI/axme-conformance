@@ -1507,6 +1507,23 @@ def _check_enterprise_service_accounts_contract(client: httpx.Client) -> Contrac
         return ContractResult("enterprise_service_accounts", False, workspace_error)
     assert workspace_id is not None
 
+    unauthorized_create = client.post(
+        "/v1/service-accounts",
+        headers={"Authorization": ""},
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "name": "conformance-runner-unauthorized",
+            "created_by_actor_id": "actor://conformance/unauthorized",
+        },
+    )
+    if unauthorized_create.status_code != 401:
+        return ContractResult(
+            "enterprise_service_accounts",
+            False,
+            f"expected unauthorized create status=401 got={unauthorized_create.status_code}",
+        )
+
     create_response = client.post(
         "/v1/service-accounts",
         json={
