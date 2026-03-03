@@ -233,10 +233,12 @@ def test_run_contract_suite_happy_path() -> None:
                 return httpx.Response(401, json={"error": "unauthorized"})
             body = json.loads(request.content.decode("utf-8"))
             access_request_id = str(uuid4())
+            expires_at = body.get("expires_at") if isinstance(body.get("expires_at"), str) else None
+            is_expired = isinstance(expires_at, str) and expires_at <= "2026-02-28T00:00:00Z"
             access_request = {
                 "access_request_id": access_request_id,
                 "request_type": body["request_type"],
-                "state": "pending",
+                "state": "expired" if is_expired else "pending",
                 "requester_actor_id": body["requester_actor_id"],
                 "org_id": body.get("org_id"),
                 "workspace_id": body.get("workspace_id"),
@@ -246,17 +248,40 @@ def test_run_contract_suite_happy_path() -> None:
                 "reviewer_actor_id": None,
                 "review_comment": None,
                 "reviewed_at": None,
+                "expires_at": expires_at,
                 "created_at": "2026-02-28T00:00:00Z",
                 "updated_at": "2026-02-28T00:00:00Z",
             }
             access_requests[access_request_id] = access_request
             return httpx.Response(200, json={"ok": True, "access_request": access_request})
+        if request.url.path == "/v1/access-requests" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id")
+            workspace_id = request.url.params.get("workspace_id")
+            state_filter = request.url.params.get("state")
+            rows: list[dict[str, object]] = []
+            for item in access_requests.values():
+                item_org = item.get("org_id")
+                item_workspace = item.get("workspace_id")
+                item_state = item.get("state")
+                if isinstance(org_id, str) and item_org != org_id:
+                    continue
+                if isinstance(workspace_id, str) and item_workspace != workspace_id:
+                    continue
+                if isinstance(state_filter, str) and item_state != state_filter:
+                    continue
+                rows.append(item)
+            return httpx.Response(200, json={"ok": True, "access_requests": rows})
         if request.url.path.startswith("/v1/access-requests/") and request.url.path.endswith("/review") and request.method == "POST":
             if not has_authorization(request):
                 return httpx.Response(401, json={"error": "unauthorized"})
             access_request_id = request.url.path.split("/v1/access-requests/")[1].split("/review")[0]
             if access_request_id not in access_requests:
                 return httpx.Response(404, json={"error": "not_found"})
+            current_state = access_requests[access_request_id].get("state")
+            if current_state not in {"pending", "under_review"}:
+                return httpx.Response(409, json={"error": "not_reviewable"})
             body = json.loads(request.content.decode("utf-8"))
             review_state_by_decision = {
                 "approve": "approved",

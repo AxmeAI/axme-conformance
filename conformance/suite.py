@@ -1398,6 +1398,61 @@ def _check_enterprise_access_requests_contract(client: httpx.Client) -> Contract
             )
         if reviewed_request.get("reviewer_actor_id") != "actor://conformance/reviewer":
             return ContractResult("enterprise_access_requests", False, "reviewer_actor_id was not persisted")
+
+    expired_create_response = client.post(
+        "/v1/access-requests",
+        json={
+            "request_type": "join_organization",
+            "requester_actor_id": "actor://conformance/requester",
+            "org_id": org_id,
+            "requested_role": "member",
+            "justification": "expired transition contract check",
+            "expires_at": "2000-01-01T00:00:00Z",
+        },
+    )
+    if expired_create_response.status_code != 200:
+        return ContractResult(
+            "enterprise_access_requests",
+            False,
+            f"expired access request create status={expired_create_response.status_code}",
+        )
+    expired_create_data = expired_create_response.json()
+    expired_access_request = expired_create_data.get("access_request")
+    if expired_create_data.get("ok") is not True or not isinstance(expired_access_request, dict):
+        return ContractResult("enterprise_access_requests", False, "invalid expired access request create response shape")
+    expired_access_request_id = expired_access_request.get("access_request_id")
+    if not _is_uuid(expired_access_request_id):
+        return ContractResult("enterprise_access_requests", False, "invalid expired access_request_id")
+    if expired_access_request.get("state") != "expired":
+        return ContractResult("enterprise_access_requests", False, "stale access request did not transition to expired")
+
+    expired_list_response = client.get(
+        "/v1/access-requests",
+        params={"org_id": org_id, "state": "expired"},
+    )
+    if expired_list_response.status_code != 200:
+        return ContractResult("enterprise_access_requests", False, f"expired list status={expired_list_response.status_code}")
+    expired_list_data = expired_list_response.json()
+    expired_rows = expired_list_data.get("access_requests")
+    if expired_list_data.get("ok") is not True or not isinstance(expired_rows, list):
+        return ContractResult("enterprise_access_requests", False, "invalid expired access request list response shape")
+    if not any(isinstance(item, dict) and item.get("access_request_id") == expired_access_request_id for item in expired_rows):
+        return ContractResult("enterprise_access_requests", False, "expired access request not present in expired-state listing")
+
+    expired_review_response = client.post(
+        f"/v1/access-requests/{expired_access_request_id}/review",
+        json={
+            "decision": "approve",
+            "reviewer_actor_id": "actor://conformance/reviewer",
+            "review_comment": "expired review should fail",
+        },
+    )
+    if expired_review_response.status_code != 409:
+        return ContractResult(
+            "enterprise_access_requests",
+            False,
+            f"expected expired review status=409 got={expired_review_response.status_code}",
+        )
     return ContractResult("enterprise_access_requests", True, "ok")
 
 
