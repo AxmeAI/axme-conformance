@@ -820,6 +820,210 @@ def test_run_contract_suite_happy_path() -> None:
                 since = int(since_raw)
                 events = [item for item in events if isinstance(item.get("seq"), int) and item["seq"] > since]
             return httpx.Response(200, json={"ok": True, "events": events})
+        if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/resume") and request.method == "POST":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/resume")[0]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            owner_agent = request.url.params.get("owner_agent")
+            if owner_agent != intents[intent_id_from_path].get("from_agent"):
+                return httpx.Response(403, json={"error": "forbidden"})
+            body = json.loads(request.content.decode("utf-8"))
+            expected_generation = body.get("expected_policy_generation")
+            current_generation = int(intents[intent_id_from_path].get("policy_generation", 0))
+            if isinstance(expected_generation, int) and expected_generation != current_generation:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "applied": False,
+                        "reason": "stale_policy_generation",
+                        "policy_generation": current_generation,
+                        "workflow_control_policy": intents[intent_id_from_path].get("workflow_control_policy", {}),
+                        "intent": intents[intent_id_from_path],
+                    },
+                )
+            events = intent_events.setdefault(intent_id_from_path, [])
+            if events and events[-1].get("status") in {"COMPLETED", "FAILED", "CANCELED"}:
+                return httpx.Response(409, json={"error": "intent already in terminal state"})
+            if intents[intent_id_from_path].get("status") == "IN_PROGRESS":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "applied": False,
+                        "reason": "already_in_progress",
+                        "policy_generation": current_generation,
+                        "workflow_control_policy": intents[intent_id_from_path].get("workflow_control_policy", {}),
+                        "intent": intents[intent_id_from_path],
+                    },
+                )
+            resume_event = {
+                "intent_id": intent_id_from_path,
+                "seq": len(events) + 1,
+                "event_type": "intent.in_progress",
+                "status": "IN_PROGRESS",
+                "waiting_reason": None,
+                "handler": intents[intent_id_from_path].get("to_agent"),
+                "actor": intents[intent_id_from_path].get("from_agent"),
+                "at": "2026-02-28T00:00:05Z",
+                "details": {
+                    "source": "intent_control_resume",
+                    "approve_current_step": bool(body.get("approve_current_step", True)),
+                },
+            }
+            events.append(resume_event)
+            intents[intent_id_from_path]["status"] = "IN_PROGRESS"
+            intents[intent_id_from_path]["policy_generation"] = current_generation + 1
+            intents[intent_id_from_path]["updated_at"] = "2026-02-28T00:00:05Z"
+            intents[intent_id_from_path]["policy_updated_at"] = "2026-02-28T00:00:05Z"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "applied": True,
+                    "policy_generation": intents[intent_id_from_path]["policy_generation"],
+                    "workflow_control_policy": intents[intent_id_from_path].get("workflow_control_policy", {}),
+                    "event": resume_event,
+                    "intent": intents[intent_id_from_path],
+                },
+            )
+        if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/controls") and request.method == "POST":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/controls")[0]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            owner_agent = request.url.params.get("owner_agent")
+            if owner_agent != intents[intent_id_from_path].get("from_agent"):
+                return httpx.Response(403, json={"error": "forbidden"})
+            body = json.loads(request.content.decode("utf-8"))
+            expected_generation = body.get("expected_policy_generation")
+            current_generation = int(intents[intent_id_from_path].get("policy_generation", 0))
+            if isinstance(expected_generation, int) and expected_generation != current_generation:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "applied": False,
+                        "reason": "stale_policy_generation",
+                        "policy_generation": current_generation,
+                        "workflow_control_policy": intents[intent_id_from_path].get("workflow_control_policy", {}),
+                        "intent": intents[intent_id_from_path],
+                    },
+                )
+            controls_patch = body.get("controls_patch")
+            if not isinstance(controls_patch, dict):
+                return httpx.Response(422, json={"error": "invalid_controls_patch"})
+            workflow_control_policy = intents[intent_id_from_path].setdefault(
+                "workflow_control_policy",
+                {"grants": {}, "controls": {}, "envelope": {}},
+            )
+            controls = workflow_control_policy.setdefault("controls", {})
+            changed = False
+            for key, value in controls_patch.items():
+                key_str = str(key)
+                if value is None:
+                    if key_str in controls:
+                        del controls[key_str]
+                        changed = True
+                    continue
+                if controls.get(key_str) != value:
+                    controls[key_str] = value
+                    changed = True
+            if not changed:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "applied": False,
+                        "reason": "no_changes",
+                        "policy_generation": current_generation,
+                        "workflow_control_policy": workflow_control_policy,
+                        "intent": intents[intent_id_from_path],
+                    },
+                )
+            intents[intent_id_from_path]["policy_generation"] = current_generation + 1
+            intents[intent_id_from_path]["policy_updated_at"] = "2026-02-28T00:00:06Z"
+            intents[intent_id_from_path]["updated_at"] = "2026-02-28T00:00:06Z"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "applied": True,
+                    "policy_generation": intents[intent_id_from_path]["policy_generation"],
+                    "workflow_control_policy": workflow_control_policy,
+                    "intent": intents[intent_id_from_path],
+                },
+            )
+        if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/policy") and request.method == "POST":
+            intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/policy")[0]
+            if intent_id_from_path not in intents:
+                return httpx.Response(404, json={"error": "not_found"})
+            owner_agent = request.url.params.get("owner_agent")
+            if owner_agent != intents[intent_id_from_path].get("from_agent"):
+                return httpx.Response(403, json={"error": "forbidden"})
+            body = json.loads(request.content.decode("utf-8"))
+            expected_generation = body.get("expected_policy_generation")
+            current_generation = int(intents[intent_id_from_path].get("policy_generation", 0))
+            if isinstance(expected_generation, int) and expected_generation != current_generation:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "applied": False,
+                        "reason": "stale_policy_generation",
+                        "policy_generation": current_generation,
+                        "workflow_control_policy": intents[intent_id_from_path].get("workflow_control_policy", {}),
+                        "intent": intents[intent_id_from_path],
+                    },
+                )
+            grants_patch = body.get("grants_patch")
+            envelope_patch = body.get("envelope_patch")
+            if grants_patch is not None and not isinstance(grants_patch, dict):
+                return httpx.Response(422, json={"error": "invalid_grants_patch"})
+            if envelope_patch is not None and not isinstance(envelope_patch, dict):
+                return httpx.Response(422, json={"error": "invalid_envelope_patch"})
+            workflow_control_policy = intents[intent_id_from_path].setdefault(
+                "workflow_control_policy",
+                {"grants": {}, "controls": {}, "envelope": {}},
+            )
+            grants = workflow_control_policy.setdefault("grants", {})
+            envelope = workflow_control_policy.setdefault("envelope", {})
+            changed = False
+            for patch, section in ((grants_patch or {}, grants), (envelope_patch or {}, envelope)):
+                for key, value in patch.items():
+                    key_str = str(key)
+                    if value is None:
+                        if key_str in section:
+                            del section[key_str]
+                            changed = True
+                        continue
+                    if section.get(key_str) != value:
+                        section[key_str] = value
+                        changed = True
+            if not changed:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "applied": False,
+                        "reason": "no_changes",
+                        "policy_generation": current_generation,
+                        "workflow_control_policy": workflow_control_policy,
+                        "intent": intents[intent_id_from_path],
+                    },
+                )
+            intents[intent_id_from_path]["policy_generation"] = current_generation + 1
+            intents[intent_id_from_path]["policy_updated_at"] = "2026-02-28T00:00:07Z"
+            intents[intent_id_from_path]["updated_at"] = "2026-02-28T00:00:07Z"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "applied": True,
+                    "policy_generation": intents[intent_id_from_path]["policy_generation"],
+                    "workflow_control_policy": workflow_control_policy,
+                    "intent": intents[intent_id_from_path],
+                },
+            )
         if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/resolve") and request.method == "POST":
             intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/resolve")[0]
             if intent_id_from_path not in intents:
@@ -947,6 +1151,9 @@ def test_run_contract_suite_happy_path() -> None:
                     "to_agent": body.get("to_agent", "agent://conformance/receiver"),
                     "reply_to": body.get("reply_to"),
                     "payload": body.get("payload") if isinstance(body.get("payload"), dict) else {},
+                    "workflow_control_policy": {"grants": {}, "controls": {}, "envelope": {}},
+                    "policy_generation": 0,
+                    "policy_updated_at": "2026-02-28T00:00:00Z",
                 }
                 intent_events[intent_id_value] = [
                     {
@@ -1985,7 +2192,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 42
+    assert len(results) == 44
     assert all(r.passed for r in results), [f"{r.name}: {r.details}" for r in results if not r.passed]
 
 
@@ -2002,7 +2209,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 42
+    assert len(results) == 44
     assert all(not result.passed for result in results)
 
 

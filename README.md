@@ -15,6 +15,8 @@ Initial harness skeleton in progress.
 - Intent stream resume contract (`/events/stream`)
 - Intent continuation autonomy contract (poll + stream terminal visibility without `get_intent` side effects)
 - Intent resolve + terminal immutability contract
+- Intent resume control-delta contract (`/v1/intents/{intent_id}/resume` + CAS)
+- Intent controls/policy control-delta contract (`/v1/intents/{intent_id}/controls|policy`)
 - Intent completion delivery contract (`reply_to` inbox visibility)
 - Inbox list contract
 - Inbox reply contract
