@@ -62,6 +62,8 @@ def run_contract_suite(
             _check_intents_stream_resume_contract(client),
             _check_intents_continuation_autonomy_contract(client),
             _check_intents_resolve_contract(client),
+            _check_intents_resume_control_contract(client),
+            _check_intents_controls_policy_contract(client),
             _check_intent_completion_delivery_contract(client),
             _check_inbox_list_contract(client),
             _check_inbox_thread_contract(client),
@@ -516,6 +518,115 @@ def _check_intents_resolve_contract(client: httpx.Client) -> ContractResult:
         return ContractResult("intents_resolve", False, f"expected 409 for second terminal, got={second_terminal.status_code}")
 
     return ContractResult("intents_resolve", True, "ok")
+
+
+def _check_intents_resume_control_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_resume_control", False, f"create status={create_response.status_code}")
+    created = create_response.json()
+    intent_id = created.get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_resume_control", False, "invalid intent_id from create response")
+    owner_agent = "agent://conformance/sender"
+
+    resume_response = client.post(
+        f"/v1/intents/{intent_id}/resume",
+        params={"owner_agent": owner_agent},
+        json={"approve_current_step": True, "expected_policy_generation": 0},
+    )
+    if resume_response.status_code != 200:
+        return ContractResult("intents_resume_control", False, f"resume status={resume_response.status_code}")
+    resume_data = resume_response.json()
+    if resume_data.get("ok") is not True:
+        return ContractResult("intents_resume_control", False, "resume response missing ok=true")
+    if resume_data.get("applied") is not True:
+        return ContractResult("intents_resume_control", False, "resume expected applied=true")
+    if not isinstance(resume_data.get("policy_generation"), int) or int(resume_data.get("policy_generation")) < 1:
+        return ContractResult("intents_resume_control", False, "resume policy_generation missing or invalid")
+
+    stale_controls = client.post(
+        f"/v1/intents/{intent_id}/controls",
+        params={"owner_agent": owner_agent},
+        json={"controls_patch": {"timeout_seconds": 120}, "expected_policy_generation": 0},
+    )
+    if stale_controls.status_code != 200:
+        return ContractResult("intents_resume_control", False, f"stale controls status={stale_controls.status_code}")
+    stale_data = stale_controls.json()
+    if stale_data.get("ok") is not True or stale_data.get("applied") is not False:
+        return ContractResult("intents_resume_control", False, "stale controls must return ok=true and applied=false")
+    if stale_data.get("reason") != "stale_policy_generation":
+        return ContractResult("intents_resume_control", False, "stale controls reason mismatch")
+
+    return ContractResult("intents_resume_control", True, "ok")
+
+
+def _check_intents_controls_policy_contract(client: httpx.Client) -> ContractResult:
+    correlation_id = str(uuid4())
+    create_response = client.post("/v1/intents", json=_build_intent_create_payload(correlation_id=correlation_id))
+    if create_response.status_code != 200:
+        return ContractResult("intents_controls_policy", False, f"create status={create_response.status_code}")
+    created = create_response.json()
+    intent_id = created.get("intent_id")
+    if not _is_uuid(intent_id):
+        return ContractResult("intents_controls_policy", False, "invalid intent_id from create response")
+    owner_agent = "agent://conformance/sender"
+
+    controls_response = client.post(
+        f"/v1/intents/{intent_id}/controls",
+        params={"owner_agent": owner_agent},
+        json={"controls_patch": {"timeout_seconds": 120}, "expected_policy_generation": 0},
+    )
+    if controls_response.status_code != 200:
+        return ContractResult("intents_controls_policy", False, f"controls status={controls_response.status_code}")
+    controls_data = controls_response.json()
+    if controls_data.get("ok") is not True:
+        return ContractResult("intents_controls_policy", False, "controls response missing ok=true")
+    if controls_data.get("applied") is not True:
+        return ContractResult("intents_controls_policy", False, "controls expected applied=true")
+    if controls_data.get("policy_generation") != 1:
+        return ContractResult("intents_controls_policy", False, "controls policy_generation mismatch")
+    controls_policy = controls_data.get("workflow_control_policy")
+    if not isinstance(controls_policy, dict):
+        return ContractResult("intents_controls_policy", False, "controls response missing workflow_control_policy")
+    controls_section = controls_policy.get("controls")
+    if not isinstance(controls_section, dict) or controls_section.get("timeout_seconds") != 120:
+        return ContractResult("intents_controls_policy", False, "controls patch not applied")
+
+    policy_response = client.post(
+        f"/v1/intents/{intent_id}/policy",
+        params={"owner_agent": owner_agent},
+        json={
+            "grants_patch": {"delegate:agent://ops": {"allow": ["resume", "update_controls"]}},
+            "envelope_patch": {"max_retry_count": 10},
+            "expected_policy_generation": 1,
+        },
+    )
+    if policy_response.status_code != 200:
+        return ContractResult("intents_controls_policy", False, f"policy status={policy_response.status_code}")
+    policy_data = policy_response.json()
+    if policy_data.get("ok") is not True or policy_data.get("applied") is not True:
+        return ContractResult("intents_controls_policy", False, "policy response missing ok=true and applied=true")
+    if policy_data.get("policy_generation") != 2:
+        return ContractResult("intents_controls_policy", False, "policy policy_generation mismatch")
+    policy_object = policy_data.get("workflow_control_policy")
+    if not isinstance(policy_object, dict):
+        return ContractResult("intents_controls_policy", False, "policy response missing workflow_control_policy")
+    envelope_section = policy_object.get("envelope")
+    if not isinstance(envelope_section, dict) or envelope_section.get("max_retry_count") != 10:
+        return ContractResult("intents_controls_policy", False, "envelope patch not applied")
+    grants_section = policy_object.get("grants")
+    if not isinstance(grants_section, dict):
+        return ContractResult("intents_controls_policy", False, "policy grants section missing")
+    delegate_grant = grants_section.get("delegate:agent://ops")
+    if not isinstance(delegate_grant, dict):
+        return ContractResult("intents_controls_policy", False, "delegate grant missing")
+    allow = delegate_grant.get("allow")
+    if not isinstance(allow, list) or "resume" not in allow or "update_controls" not in allow:
+        return ContractResult("intents_controls_policy", False, "delegate grant allow list mismatch")
+
+    return ContractResult("intents_controls_policy", True, "ok")
 
 
 def _check_intent_completion_delivery_contract(client: httpx.Client) -> ContractResult:
