@@ -118,7 +118,7 @@ A conformance check is considered passing only when it succeeds against:
 | Repository | Relationship |
 |---|---|
 | [axme-spec](https://github.com/AxmeAI/axme-spec) | Source of truth for contracts being validated |
-| [axme-control-plane](https://github.com/AxmeAI/axme-control-plane) | Primary runtime under test |
+| Control-plane runtime (private) | Primary runtime under test |
 | [axme-docs](https://github.com/AxmeAI/axme-docs) | Narrative documentation that conformance evidence supports |
 | [axme-sdk-python](https://github.com/AxmeAI/axme-sdk-python) | Python SDK validated by this suite |
 | [axme-sdk-typescript](https://github.com/AxmeAI/axme-sdk-typescript) | TypeScript SDK |
