@@ -1,41 +1,136 @@
 # axme-conformance
 
-Conformance suite for API and SDK compatibility checks.
+**Conformance suite for the AXME platform.** This repository contains the canonical contract test suite that validates spec-runtime-SDK parity across all API families, lifecycle invariants, and enterprise-boundary guarantees.
 
-## Status
+> **Alpha** · Conformance surface is expanding alongside the API. Not all families have full coverage yet.  
+> Questions and conformance proposals → [hello@axme.ai](mailto:hello@axme.ai)
 
-Initial harness skeleton in progress.
+---
 
-## Scope (Track C baseline)
+## Purpose
 
-- Health contract
-- Intent create contract
-- Intent create idempotency/correlation contract
-- Intent events list contract (`since` cursor semantics)
-- Intent stream resume contract (`/events/stream`)
-- Intent continuation autonomy contract (poll + stream terminal visibility without `get_intent` side effects)
-- Intent resolve + terminal immutability contract
-- Intent resume control-delta contract (`/v1/intents/{intent_id}/resume` + CAS)
-- Intent controls/policy control-delta contract (`/v1/intents/{intent_id}/controls|policy`)
-- Intent completion delivery contract (`reply_to` inbox visibility)
-- Inbox list contract
-- Inbox reply contract
-- Inbox changes pagination contract
-- Webhooks subscriptions contract
-- Webhooks events/replay contract
-- Enterprise organizations smoke contract
-- Enterprise workspaces smoke contract
-- Enterprise access requests smoke contract
-- Enterprise quotas and usage smoke contract
-- Enterprise usage timeseries and strict quota enforcement contract
-- Enterprise naming/routing/transports/deliveries contract (resolver chain + replay)
-- Enterprise service-account lifecycle smoke contract
-- Enterprise tenant-boundary and permission error contract
-- Baseline suite execution and result model
+The conformance suite is the authoritative answer to: *"Does this implementation correctly implement the AXME protocol and public API contracts?"*
 
-## Development
+It validates:
+
+- **API contract correctness** — request/response shapes, status codes, error semantics
+- **Lifecycle invariants** — state machine rules, terminal-state immutability, transition ordering
+- **Idempotency guarantees** — duplicate requests return identical responses without side effects
+- **Cursor and pagination** — consistent traversal across pages, stable ordering
+- **Event consistency** — SSE and webhook event ordering and delivery guarantees
+- **Enterprise access and tenant boundaries** — org/workspace scoping, role enforcement, quota limits
+- **Control-delta semantics** — `resume`, `controls`, and `policy` mutation rules and conflict resolution
+
+---
+
+## Repository Structure
+
+```
+axme-conformance/
+├── conformance/
+│   ├── checks/                # Individual conformance check modules
+│   ├── fixtures/              # Shared test fixtures and scenario builders
+│   └── runner.py              # Check discovery and orchestration
+├── tests/                     # Test harness and integration runners
+└── docs/
+    ├── diagrams/              # Conformance-specific diagrams
+    └── coverage-matrix.md     # Family-level coverage status
+```
+
+---
+
+## Conformance Traceability
+
+The traceability map shows how conformance checks are anchored to spec families, runtime behaviors, and SDK methods.
+
+![Conformance Traceability Map](docs/diagrams/04-conformance-traceability-map.svg)
+
+*Each check cell links a spec contract (from `axme-spec`) to a runtime behavior (tested against `axme-control-plane`) and an SDK binding (tested per SDK). Green = passing, yellow = partial, red = failing or not yet implemented.*
+
+---
+
+## Audit and Evidence
+
+Conformance results feed the audit trail. Every check run produces an evidence record that maps to the access control and policy enforcement layer.
+
+![Audit Trail Map](docs/diagrams/08-audit-trail-map.svg)
+
+*Audit evidence is structured: which check ran, against which endpoint, with which actor identity, what the result was. Evidence records are stored in the CI artifact archive.*
+
+---
+
+## Schema Compatibility Checks
+
+Schema governance checks validate that schema changes in `axme-spec` do not introduce backward-incompatible breaks for existing consumers.
+
+![Schema Governance and Compatibility](docs/diagrams/04-schema-governance-compatibility.svg)
+
+*The compatibility check compares the new schema against all previously registered consumer versions. A breaking change fails the gate and requires a new schema version.*
+
+---
+
+## Resume, Controls, and Policy Conflict Resolution
+
+The most complex conformance domain covers the three-way conflict between a `resume` call, an in-flight `controls` update, and a `policy` mutation arriving at the same instant.
+
+![Resume, Controls, and Policy Conflict Resolution](docs/diagrams/11-resume-controls-policy-conflict-resolution.svg)
+
+*Conflict resolution rules: `resume` wins over `controls` if the intent is in a terminal `WAITING_*` state. `policy_generation` CAS prevents concurrent `policy` mutations from stomping each other. All conflicts are recorded in the audit trail.*
+
+---
+
+## Running the Suite
 
 ```bash
+# Install
 python -m pip install -e ".[dev]"
+
+# Run all conformance checks
 pytest
+
+# Run a specific family
+pytest conformance/checks/test_intents_lifecycle.py -v
+
+# Run against a custom gateway
+AXME_GATEWAY_URL=https://your-gateway.example.com pytest
 ```
+
+---
+
+## Coverage Matrix
+
+The current coverage status by API family is in [`docs/coverage-matrix.md`](docs/coverage-matrix.md). Target for Alpha release: all D1 families (intents, inbox, approvals) at 100% pass rate.
+
+---
+
+## Integration Rule
+
+A conformance check is considered passing only when it succeeds against:
+
+1. The reference runtime (`axme-control-plane` staging)
+2. All five SDK clients (Python, TypeScript, Go, Java, .NET)
+3. The schema definitions in `axme-spec`
+
+---
+
+## Related Repositories
+
+| Repository | Relationship |
+|---|---|
+| [axme-spec](https://github.com/AxmeAI/axme-spec) | Source of truth for contracts being validated |
+| Control-plane runtime (private) | Primary runtime under test |
+| [axme-docs](https://github.com/AxmeAI/axme-docs) | Narrative documentation that conformance evidence supports |
+| [axme-sdk-python](https://github.com/AxmeAI/axme-sdk-python) | Python SDK validated by this suite |
+| [axme-sdk-typescript](https://github.com/AxmeAI/axme-sdk-typescript) | TypeScript SDK |
+| [axme-sdk-go](https://github.com/AxmeAI/axme-sdk-go) | Go SDK |
+| [axme-sdk-java](https://github.com/AxmeAI/axme-sdk-java) | Java SDK |
+| [axme-sdk-dotnet](https://github.com/AxmeAI/axme-sdk-dotnet) | .NET SDK |
+
+---
+
+## Contributing & Contact
+
+- New conformance check proposals: open an issue with label `conformance-proposal`
+- Alpha program and access: [hello@axme.ai](mailto:hello@axme.ai)
+- Security disclosures: see [SECURITY.md](SECURITY.md)
+- Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
