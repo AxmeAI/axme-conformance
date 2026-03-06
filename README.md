@@ -7,6 +7,43 @@
 
 ---
 
+## What Is AXME?
+
+AXME is a coordination infrastructure for durable execution of long-running intents across distributed systems.
+
+It provides a model for executing **intents** — requests that may take minutes, hours, or longer to complete — across services, agents, and human participants.
+
+## AXP — the Intent Protocol
+
+At the core of AXME is **AXP (Intent Protocol)** — an open protocol that defines contracts and lifecycle rules for intent processing.
+
+AXP can be implemented independently.  
+The open part of the platform includes:
+
+- the protocol specification and schemas
+- SDKs and CLI for integration
+- conformance tests
+- implementation and integration documentation
+
+## AXME Cloud
+
+**AXME Cloud** is the managed service that runs AXP in production together with **The Registry** (identity and routing).
+
+It removes operational complexity by providing:
+
+- reliable intent delivery and retries  
+- lifecycle management for long-running operations  
+- handling of timeouts, waits, reminders, and escalation  
+- observability of intent status and execution history  
+
+State and events can be accessed through:
+
+- API and SDKs  
+- event streams and webhooks  
+- the cloud console
+
+---
+
 ## Purpose
 
 The conformance suite is the authoritative answer to: *"Does this implementation correctly implement the AXME protocol and public API contracts?"*
