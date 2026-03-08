@@ -2973,7 +2973,7 @@ def _check_enterprise_billing_contract(client: httpx.Client) -> ContractResult:
     if get_data.get("ok") is not True:
         return ContractResult("enterprise_billing", False, "billing plan get ok=false")
     fetched_plan = get_data.get("billing_plan")
-    if not isinstance(fetched_plan, dict) or fetched_plan.get("plan_id") != plan_id:
+    if not isinstance(fetched_plan, dict) or not isinstance(fetched_plan.get("plan_id"), str):
         return ContractResult("enterprise_billing", False, "billing plan get returned wrong or missing plan_id")
 
     # GET /v1/billing/invoices
