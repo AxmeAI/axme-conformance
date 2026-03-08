@@ -2185,6 +2185,43 @@ def test_run_contract_suite_happy_path() -> None:
             replay_payload["idempotency_key"] = None
             deliveries[replay_id] = replay_payload
             return httpx.Response(200, json={"ok": True, "delivery": replay_payload})
+        if request.url.path == "/v1/billing/plan" and request.method == "PATCH":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            body = json.loads(request.content)
+            plan_id = f"plan_{uuid4().hex[:24]}"
+            billing_plan = {
+                "plan_id": plan_id,
+                "org_id": body.get("org_id", ""),
+                "workspace_id": body.get("workspace_id", ""),
+                "plan_name": body.get("plan_name", "starter"),
+                "billing_cycle": body.get("billing_cycle", "monthly"),
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+            return httpx.Response(200, json={"ok": True, "billing_plan": billing_plan})
+        if request.url.path == "/v1/billing/plan" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            org_id = request.url.params.get("org_id", "org_test")
+            workspace_id = request.url.params.get("workspace_id", "ws_test")
+            plan_id = f"plan_{uuid4().hex[:24]}"
+            billing_plan = {
+                "plan_id": plan_id,
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "plan_name": "starter",
+                "billing_cycle": "monthly",
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+            return httpx.Response(200, json={"ok": True, "billing_plan": billing_plan})
+        if request.url.path == "/v1/billing/invoices" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            return httpx.Response(200, json={"ok": True, "invoices": []})
         return httpx.Response(404, json={"error": "not_found"})
 
     results = run_contract_suite(
@@ -2192,7 +2229,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 44
+    assert len(results) == 45
     assert all(r.passed for r in results), [f"{r.name}: {r.details}" for r in results if not r.passed]
 
 
@@ -2209,7 +2246,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 44
+    assert len(results) == 45
     assert all(not result.passed for result in results)
 
 
