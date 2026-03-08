@@ -65,13 +65,12 @@ It validates:
 ```
 axme-conformance/
 ├── conformance/
-│   ├── checks/                # Individual conformance check modules
-│   ├── fixtures/              # Shared test fixtures and scenario builders
-│   └── runner.py              # Check discovery and orchestration
-├── tests/                     # Test harness and integration runners
+│   ├── __init__.py
+│   └── suite.py               # All contract checks and MCP contract suite
+├── tests/
+│   └── test_suite.py          # Pytest harness — runs suite against local transport
 └── docs/
-    ├── diagrams/              # Conformance-specific diagrams
-    └── coverage-matrix.md     # Family-level coverage status
+    └── diagrams/              # Conformance-specific diagrams
 ```
 
 ---
@@ -136,7 +135,7 @@ AXME_GATEWAY_URL=https://your-gateway.example.com pytest
 
 ## Coverage Matrix
 
-The current coverage status by API family is in [`docs/coverage-matrix.md`](docs/coverage-matrix.md). Target for Alpha release: all D1 families (intents, inbox, approvals) at 100% pass rate.
+Coverage by API family: all D1 families (intents, inbox, approvals, webhooks) have full contract checks. Enterprise admin families (orgs, workspaces, service accounts, quotas) are covered. The `billing` family has schema contracts defined but no conformance checks yet — tracked for addition. Target for Alpha release: all D1 families at 100% pass rate.
 
 ---
 

@@ -97,6 +97,7 @@ def run_contract_suite(
             _check_enterprise_tenant_boundary_and_permission_contract(client),
             _check_webhooks_subscriptions_contract(client),
             _check_webhooks_events_contract(client),
+            _check_enterprise_billing_contract(client),
         ]
     finally:
         client.close()
@@ -2916,3 +2917,77 @@ def _is_uuid(value: object) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _check_enterprise_billing_contract(client: httpx.Client) -> ContractResult:
+    org_id, error = _create_enterprise_organization_for_contract(client, name="Conformance Billing Org")
+    if error:
+        return ContractResult("enterprise_billing", False, error)
+    assert org_id is not None
+    workspace_id, workspace_error = _create_enterprise_workspace_for_contract(
+        client,
+        org_id=org_id,
+        name="Conformance Billing Workspace",
+    )
+    if workspace_error:
+        return ContractResult("enterprise_billing", False, workspace_error)
+    assert workspace_id is not None
+
+    # PATCH /v1/billing/plan — upsert billing plan
+    patch_resp = client.patch(
+        "/v1/billing/plan",
+        json={
+            "org_id": org_id,
+            "workspace_id": workspace_id,
+            "plan_name": "starter",
+            "billing_cycle": "monthly",
+            "updated_by_actor_id": "actor://conformance/admin",
+        },
+    )
+    if patch_resp.status_code != 200:
+        return ContractResult(
+            "enterprise_billing",
+            False,
+            f"billing plan upsert status={patch_resp.status_code} body={patch_resp.text[:200]}",
+        )
+    patch_data = patch_resp.json()
+    if patch_data.get("ok") is not True:
+        return ContractResult("enterprise_billing", False, f"billing plan upsert ok=false body={patch_resp.text[:200]}")
+    billing_plan = patch_data.get("billing_plan")
+    if not isinstance(billing_plan, dict):
+        return ContractResult("enterprise_billing", False, "billing_plan missing from upsert response")
+    if not isinstance(billing_plan.get("plan_id"), str):
+        return ContractResult("enterprise_billing", False, "billing_plan.plan_id not a string")
+
+    plan_id = billing_plan["plan_id"]
+
+    # GET /v1/billing/plan
+    get_resp = client.get("/v1/billing/plan", params={"org_id": org_id, "workspace_id": workspace_id})
+    if get_resp.status_code != 200:
+        return ContractResult(
+            "enterprise_billing",
+            False,
+            f"billing plan get status={get_resp.status_code}",
+        )
+    get_data = get_resp.json()
+    if get_data.get("ok") is not True:
+        return ContractResult("enterprise_billing", False, "billing plan get ok=false")
+    fetched_plan = get_data.get("billing_plan")
+    if not isinstance(fetched_plan, dict) or fetched_plan.get("plan_id") != plan_id:
+        return ContractResult("enterprise_billing", False, "billing plan get returned wrong or missing plan_id")
+
+    # GET /v1/billing/invoices
+    invoices_resp = client.get("/v1/billing/invoices", params={"org_id": org_id, "workspace_id": workspace_id})
+    if invoices_resp.status_code != 200:
+        return ContractResult(
+            "enterprise_billing",
+            False,
+            f"billing invoices list status={invoices_resp.status_code}",
+        )
+    invoices_data = invoices_resp.json()
+    if invoices_data.get("ok") is not True:
+        return ContractResult("enterprise_billing", False, "billing invoices list ok=false")
+    if not isinstance(invoices_data.get("invoices"), list):
+        return ContractResult("enterprise_billing", False, "invoices field not a list")
+
+    return ContractResult("enterprise_billing", True, "billing plan upsert/get and invoice list passed")
