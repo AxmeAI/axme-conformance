@@ -79,7 +79,7 @@ axme-conformance/
 
 The traceability map shows how conformance checks are anchored to spec families, runtime behaviors, and SDK methods.
 
-![Conformance Traceability Map](docs/diagrams/04-conformance-traceability-map.svg)
+![Conformance Traceability Map](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/platform/04-conformance-traceability-map.svg)
 
 *Each check cell links a spec contract (from `axme-spec`) to a runtime behavior (tested against `axme-control-plane`) and an SDK binding (tested per SDK). Green = passing, yellow = partial, red = failing or not yet implemented.*
 
@@ -89,7 +89,7 @@ The traceability map shows how conformance checks are anchored to spec families,
 
 Conformance results feed the audit trail. Every check run produces an evidence record that maps to the access control and policy enforcement layer.
 
-![Audit Trail Map](docs/diagrams/08-audit-trail-map.svg)
+![Audit Trail Map](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/intents/08-audit-trail-map.svg)
 
 *Audit evidence is structured: which check ran, against which endpoint, with which actor identity, what the result was. Evidence records are stored in the CI artifact archive.*
 
@@ -99,7 +99,7 @@ Conformance results feed the audit trail. Every check run produces an evidence r
 
 Schema governance checks validate that schema changes in `axme-spec` do not introduce backward-incompatible breaks for existing consumers.
 
-![Schema Governance and Compatibility](docs/diagrams/04-schema-governance-compatibility.svg)
+![Schema Governance and Compatibility](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/protocol/04-schema-governance-compatibility.svg)
 
 *The compatibility check compares the new schema against all previously registered consumer versions. A breaking change fails the gate and requires a new schema version.*
 
@@ -109,7 +109,7 @@ Schema governance checks validate that schema changes in `axme-spec` do not intr
 
 The most complex conformance domain covers the three-way conflict between a `resume` call, an in-flight `controls` update, and a `policy` mutation arriving at the same instant.
 
-![Resume, Controls, and Policy Conflict Resolution](docs/diagrams/11-resume-controls-policy-conflict-resolution.svg)
+![Resume, Controls, and Policy Conflict Resolution](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/intents/11-resume-controls-policy-conflict-resolution.svg)
 
 *Conflict resolution rules: `resume` wins over `controls` if the intent is in a terminal `WAITING_*` state. `policy_generation` CAS prevents concurrent `policy` mutations from stomping each other. All conflicts are recorded in the audit trail.*
 
