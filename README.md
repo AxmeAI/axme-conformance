@@ -167,6 +167,6 @@ A conformance check is considered passing only when it succeeds against:
 ## Contributing & Contact
 
 - New conformance check proposals: open an issue with label `conformance-proposal`
-- Alpha access: https://cloud.axme.ai/alpha · Contact and suggestions: [hello@axme.ai](mailto:hello@axme.ai)
+- Quick Start: https://cloud.axme.ai/alpha/cli · Contact: [hello@axme.ai](mailto:hello@axme.ai)
 - Security disclosures: see [SECURITY.md](SECURITY.md)
 - Contribution guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
