@@ -31,6 +31,9 @@ def test_run_contract_suite_happy_path() -> None:
     transport_bindings: dict[str, dict[str, object]] = {}
     deliveries: dict[str, dict[str, object]] = {}
     reconcile_events: list[dict[str, object]] = []
+    agent_addresses: dict[str, dict[str, object]] = {}  # address → {address_id, address, org_id, workspace_id, sa_id}
+    org_receive_policies: dict[str, dict[str, object]] = {}  # org_id → {policy_id, policy_type, entries: []}
+    agent_receive_overrides: dict[str, dict[str, object]] = {}  # address_id → {override_id, override_type, entries: []}
     invite_counter = 0
     media_counter = 0
     thread_id = "11111111-1111-4111-8111-111111111111"
@@ -153,9 +156,11 @@ def test_run_contract_suite_happy_path() -> None:
                 return httpx.Response(401, json={"error": "unauthorized"})
             body = json.loads(request.content.decode("utf-8"))
             org_id = str(uuid4())
+            org_slug = body["name"].lower().replace(" ", "-")[:40] + "-" + org_id[:8]
             organization = {
                 "org_id": org_id,
                 "name": body["name"],
+                "slug": org_slug,
                 "legal_name": body.get("legal_name"),
                 "primary_domain": body.get("primary_domain"),
                 "status": "active",
@@ -215,10 +220,12 @@ def test_run_contract_suite_happy_path() -> None:
                     if body.get("org_id") != org_id_from_path:
                         return httpx.Response(422, json={"error": "org mismatch"})
                     workspace_id = str(uuid4())
+                    ws_slug = body["name"].lower().replace(" ", "-")[:40] + "-" + workspace_id[:8]
                     workspace = {
                         "workspace_id": workspace_id,
                         "org_id": org_id_from_path,
                         "name": body["name"],
+                        "slug": ws_slug,
                         "environment": body["environment"],
                         "status": "active",
                         "region": body.get("region"),
@@ -720,6 +727,13 @@ def test_run_contract_suite_happy_path() -> None:
             if workspace is None or workspace["org_id"] != org_id:
                 return httpx.Response(403, json={"error": "workspace outside org scope"})
             service_account_id = f"sa_{uuid4().hex[:24]}"
+            # Derive agent address from org/workspace slugs
+            org_obj = organizations.get(org_id, {})
+            ws_obj = workspace
+            org_slug = org_obj.get("slug") or org_id.replace("_", "-")[:20]
+            ws_slug = ws_obj.get("slug") or workspace_id.replace("_", "-")[:20]
+            agent_address = f"agent://{org_slug}/{ws_slug}/{body['name']}"
+            address_id = f"addr_{uuid4().hex[:24]}"
             service_account = {
                 "service_account_id": service_account_id,
                 "org_id": org_id,
@@ -727,11 +741,20 @@ def test_run_contract_suite_happy_path() -> None:
                 "name": body["name"],
                 "description": body.get("description"),
                 "status": "active",
+                "agent_address": agent_address,
+                "address": agent_address,
                 "created_by_actor_id": body["created_by_actor_id"],
                 "created_at": "2026-02-28T00:00:00Z",
                 "updated_at": "2026-02-28T00:00:00Z",
             }
             service_accounts[service_account_id] = service_account
+            agent_addresses[agent_address] = {
+                "address_id": address_id, "address": agent_address,
+                "org_id": org_id, "workspace_id": workspace_id,
+                "service_account_id": service_account_id, "service_account_name": body["name"],
+                "display_name": body["name"], "status": "active",
+                "created_at": "2026-02-28T00:00:00Z", "updated_at": "2026-02-28T00:00:00Z",
+            }
             return httpx.Response(200, json={"ok": True, "service_account": service_account})
         if request.url.path == "/v1/service-accounts" and request.method == "GET":
             if not has_authorization(request):
@@ -782,6 +805,99 @@ def test_run_contract_suite_happy_path() -> None:
             key_payload["revoked_at"] = "2026-02-28T00:00:05Z"
             service_account_keys[key_id] = key_payload
             return httpx.Response(200, json={"ok": True, "key": key_payload})
+
+        # --- Agents list ---
+        if request.url.path == "/v1/agents" and request.method == "GET":
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            filter_org = request.url.params.get("org_id")
+            filter_ws = request.url.params.get("workspace_id")
+            items = [
+                a for a in agent_addresses.values()
+                if (not filter_org or a.get("org_id") == filter_org)
+                and (not filter_ws or a.get("workspace_id") == filter_ws)
+            ]
+            return httpx.Response(200, json={"ok": True, "agents": items})
+
+        # --- Org Receive Policy ---
+        if "/receive-policy" in request.url.path and request.url.path.startswith("/v1/organizations/"):
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            parts = request.url.path.split("/")
+            org_id = parts[3]  # /v1/organizations/{org_id}/receive-policy...
+            if org_id not in organizations:
+                return httpx.Response(404, json={"error": "org_not_found"})
+            # Ensure policy exists
+            if org_id not in org_receive_policies:
+                org_receive_policies[org_id] = {
+                    "policy_id": f"orp_{uuid4().hex[:24]}",
+                    "org_id": org_id, "policy_type": "closed", "entries": [],
+                }
+            policy = org_receive_policies[org_id]
+            if request.url.path.endswith("/receive-policy") and request.method == "GET":
+                return httpx.Response(200, json={"ok": True, "policy": policy})
+            if request.url.path.endswith("/receive-policy") and request.method == "PUT":
+                body = json.loads(request.content.decode("utf-8"))
+                policy["policy_type"] = body.get("policy_type", policy["policy_type"])
+                return httpx.Response(200, json={"ok": True, "policy": policy})
+            if request.url.path.endswith("/receive-policy/entries") and request.method == "POST":
+                body = json.loads(request.content.decode("utf-8"))
+                entry = {"entry_id": f"ore_{uuid4().hex[:24]}", "sender_pattern": body["sender_pattern"],
+                         "created_at": "2026-02-28T00:00:00Z"}
+                policy["entries"].append(entry)
+                return httpx.Response(200, json={"ok": True, "policy": policy})
+            if "/receive-policy/entries/" in request.url.path and request.method == "DELETE":
+                entry_id = parts[-1]
+                policy["entries"] = [e for e in policy["entries"] if e["entry_id"] != entry_id]
+                return httpx.Response(200, json={"ok": True, "policy": policy})
+
+        # --- Agent Receive Override ---
+        if "/receive-override" in request.url.path and request.url.path.startswith("/v1/agents/"):
+            if not has_authorization(request):
+                return httpx.Response(401, json={"error": "unauthorized"})
+            # Extract address from path: /v1/agents/{addr_path}/receive-override...
+            after_agents = request.url.path.split("/v1/agents/")[1]
+            if "/receive-override/entries/" in after_agents:
+                addr_path = after_agents.split("/receive-override/entries/")[0]
+                entry_id = after_agents.split("/receive-override/entries/")[1]
+            elif "/receive-override/entries" in after_agents:
+                addr_path = after_agents.split("/receive-override/entries")[0].rstrip("/")
+                entry_id = None
+            else:
+                addr_path = after_agents.split("/receive-override")[0].rstrip("/")
+                entry_id = None
+            full_address = f"agent://{addr_path}"
+            addr_info = agent_addresses.get(full_address)
+            if not addr_info:
+                return httpx.Response(404, json={"error": "agent_not_found"})
+            address_id = addr_info["address_id"]
+            if address_id not in agent_receive_overrides:
+                agent_receive_overrides[address_id] = {
+                    "override_id": f"aro_{uuid4().hex[:24]}",
+                    "address": full_address, "address_id": address_id,
+                    "override_type": "use_org_default", "entries": [],
+                }
+            override = agent_receive_overrides[address_id]
+            if request.url.path.endswith("/receive-override") and request.method == "GET":
+                return httpx.Response(200, json={"ok": True, "override": override})
+            if request.url.path.endswith("/receive-override") and request.method == "PUT":
+                body = json.loads(request.content.decode("utf-8"))
+                override["override_type"] = body.get("override_type", override["override_type"])
+                if override["override_type"] == "use_org_default":
+                    del agent_receive_overrides[address_id]
+                    override = {"address": full_address, "address_id": address_id,
+                                "override_type": "use_org_default", "entries": []}
+                return httpx.Response(200, json={"ok": True, "override": override})
+            if entry_id is None and request.method == "POST":
+                body = json.loads(request.content.decode("utf-8"))
+                entry = {"entry_id": f"are_{uuid4().hex[:24]}", "sender_pattern": body["sender_pattern"],
+                         "created_at": "2026-02-28T00:00:00Z"}
+                override["entries"].append(entry)
+                return httpx.Response(200, json={"ok": True, "override": override})
+            if entry_id and request.method == "DELETE":
+                override["entries"] = [e for e in override["entries"] if e["entry_id"] != entry_id]
+                return httpx.Response(200, json={"ok": True, "override": override})
+
         if request.url.path.startswith("/v1/intents/") and request.url.path.endswith("/events/stream") and request.method == "GET":
             intent_id_from_path = request.url.path.split("/v1/intents/")[1].split("/events/stream")[0]
             if intent_id_from_path not in intents:
@@ -2229,7 +2345,7 @@ def test_run_contract_suite_happy_path() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 45
+    assert len(results) == 52
     assert all(r.passed for r in results), [f"{r.name}: {r.details}" for r in results if not r.passed]
 
 
@@ -2246,7 +2362,7 @@ def test_run_contract_suite_reports_failures() -> None:
         api_key="token",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
-    assert len(results) == 45
+    assert len(results) == 52
     assert all(not result.passed for result in results)
 
 
