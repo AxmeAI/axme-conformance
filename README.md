@@ -7,40 +7,10 @@
 
 ---
 
-## What Is AXME?
+## About AXME
 
-AXME is a coordination infrastructure for durable execution of long-running intents across distributed systems.
-
-It provides a model for executing **intents** — requests that may take minutes, hours, or longer to complete — across services, agents, and human participants.
-
-## AXP — the Intent Protocol
-
-At the core of AXME is **AXP (Intent Protocol)** — an open protocol that defines contracts and lifecycle rules for intent processing.
-
-AXP can be implemented independently.  
-The open part of the platform includes:
-
-- the protocol specification and schemas
-- SDKs and CLI for integration
-- conformance tests
-- implementation and integration documentation
-
-## AXME Cloud
-
-**AXME Cloud** is the managed service that runs AXP in production together with **The Registry** (identity and routing).
-
-It removes operational complexity by providing:
-
-- reliable intent delivery and retries  
-- lifecycle management for long-running operations  
-- handling of timeouts, waits, reminders, and escalation  
-- observability of intent status and execution history  
-
-State and events can be accessed through:
-
-- API and SDKs  
-- event streams and webhooks  
-- the cloud console
+AXME is a coordination infrastructure for durable execution of intents across services, agents, and humans.
+Learn more at [github.com/AxmeAI/axme](https://github.com/AxmeAI/axme).
 
 ---
 
@@ -50,13 +20,13 @@ The conformance suite is the authoritative answer to: *"Does this implementation
 
 It validates:
 
-- **API contract correctness** — request/response shapes, status codes, error semantics
-- **Lifecycle invariants** — state machine rules, terminal-state immutability, transition ordering
-- **Idempotency guarantees** — duplicate requests return identical responses without side effects
-- **Cursor and pagination** — consistent traversal across pages, stable ordering
-- **Event consistency** — SSE and webhook event ordering and delivery guarantees
-- **Enterprise access and tenant boundaries** — org/workspace scoping, role enforcement, quota limits
-- **Control-delta semantics** — `resume`, `controls`, and `policy` mutation rules and conflict resolution
+- **API contract correctness** - request/response shapes, status codes, error semantics
+- **Lifecycle invariants** - state machine rules, terminal-state immutability, transition ordering
+- **Idempotency guarantees** - duplicate requests return identical responses without side effects
+- **Cursor and pagination** - consistent traversal across pages, stable ordering
+- **Event consistency** - SSE and webhook event ordering and delivery guarantees
+- **Enterprise access and tenant boundaries** - org/workspace scoping, role enforcement, quota limits
+- **Control-delta semantics** - `resume`, `controls`, and `policy` mutation rules and conflict resolution
 
 ---
 
@@ -68,9 +38,12 @@ axme-conformance/
 │   ├── __init__.py
 │   └── suite.py               # All contract checks and MCP contract suite
 ├── tests/
-│   └── test_suite.py          # Pytest harness — runs suite against local transport
-└── docs/
-    └── diagrams/              # Conformance-specific diagrams
+│   └── test_suite.py          # Pytest harness - runs suite against local transport
+├── pyproject.toml
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+└── LICENSE
 ```
 
 ---
@@ -85,13 +58,16 @@ The traceability map shows how conformance checks are anchored to spec families,
 
 ---
 
-## Audit and Evidence
+<details>
+<summary><strong>Audit and Evidence</strong></summary>
 
 Conformance results feed the audit trail. Every check run produces an evidence record that maps to the access control and policy enforcement layer.
 
 ![Audit Trail Map](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/intents/08-audit-trail-map.svg)
 
 *Audit evidence is structured: which check ran, against which endpoint, with which actor identity, what the result was. Evidence records are stored in the CI artifact archive.*
+
+</details>
 
 ---
 
@@ -105,13 +81,16 @@ Schema governance checks validate that schema changes in `axme-spec` do not intr
 
 ---
 
-## Resume, Controls, and Policy Conflict Resolution
+<details>
+<summary><strong>Resume, Controls, and Policy Conflict Resolution</strong></summary>
 
 The most complex conformance domain covers the three-way conflict between a `resume` call, an in-flight `controls` update, and a `policy` mutation arriving at the same instant.
 
 ![Resume, Controls, and Policy Conflict Resolution](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/intents/11-resume-controls-policy-conflict-resolution.svg)
 
 *Conflict resolution rules: `resume` wins over `controls` if the intent is in a terminal `WAITING_*` state. `policy_generation` CAS prevents concurrent `policy` mutations from stomping each other. All conflicts are recorded in the audit trail.*
+
+</details>
 
 ---
 
@@ -124,8 +103,8 @@ python -m pip install -e ".[dev]"
 # Run all conformance checks
 pytest
 
-# Run a specific family
-pytest conformance/checks/test_intents_lifecycle.py -v
+# Run a specific test by keyword
+pytest tests/test_suite.py -k "intents_lifecycle" -v
 
 # Run against a custom gateway
 AXME_GATEWAY_URL=https://your-gateway.example.com pytest
@@ -135,7 +114,7 @@ AXME_GATEWAY_URL=https://your-gateway.example.com pytest
 
 ## Coverage Matrix
 
-Coverage by API family: all D1 families (intents, inbox, approvals, webhooks) have full contract checks. Enterprise admin families (orgs, workspaces, service accounts, quotas) are covered. The `billing` family has schema contracts defined but no conformance checks yet — tracked for addition. Target for Alpha release: all D1 families at 100% pass rate.
+Coverage by API family: all D1 families (intents, inbox, approvals, webhooks) have full contract checks. Enterprise admin families (orgs, workspaces, service accounts, quotas) are covered. The `billing` family has schema contracts defined but no conformance checks yet - tracked for addition. Target for Alpha release: all D1 families at 100% pass rate.
 
 ---
 
