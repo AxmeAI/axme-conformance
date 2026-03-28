@@ -54,7 +54,7 @@ The traceability map shows how conformance checks are anchored to spec families,
 
 ![Conformance Traceability Map](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/platform/04-conformance-traceability-map.svg)
 
-*Each check cell links a spec contract (from `axme-spec`) to a runtime behavior (tested against `axme-control-plane`) and an SDK binding (tested per SDK). Green = passing, yellow = partial, red = failing or not yet implemented.*
+*Each check cell links a spec contract (from `axp-spec`) to a runtime behavior (tested against `axme-control-plane`) and an SDK binding (tested per SDK). Green = passing, yellow = partial, red = failing or not yet implemented.*
 
 ---
 
@@ -73,7 +73,7 @@ Conformance results feed the audit trail. Every check run produces an evidence r
 
 ## Schema Compatibility Checks
 
-Schema governance checks validate that schema changes in `axme-spec` do not introduce backward-incompatible breaks for existing consumers.
+Schema governance checks validate that schema changes in `axp-spec` do not introduce backward-incompatible breaks for existing consumers.
 
 ![Schema Governance and Compatibility](https://raw.githubusercontent.com/AxmeAI/axme-docs/main/docs/diagrams/protocol/04-schema-governance-compatibility.svg)
 
@@ -124,7 +124,7 @@ A conformance check is considered passing only when it succeeds against:
 
 1. The reference runtime (`axme-control-plane` staging)
 2. All five SDK clients (Python, TypeScript, Go, Java, .NET)
-3. The schema definitions in `axme-spec`
+3. The schema definitions in `axp-spec`
 
 ---
 
@@ -132,7 +132,7 @@ A conformance check is considered passing only when it succeeds against:
 
 | Repository | Relationship |
 |---|---|
-| [axme-spec](https://github.com/AxmeAI/axme-spec) | Source of truth for contracts being validated |
+| [axp-spec](https://github.com/AxmeAI/axp-spec) | Source of truth for contracts being validated |
 | Control-plane runtime (private) | Primary runtime under test |
 | [axme-docs](https://github.com/AxmeAI/axme-docs) | Narrative documentation that conformance evidence supports |
 | [axme-sdk-python](https://github.com/AxmeAI/axme-sdk-python) | Python SDK validated by this suite |
